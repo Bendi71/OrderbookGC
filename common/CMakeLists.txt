@@ -6,13 +6,13 @@ set(LIBRARY_NAME orderbook_common)
 set(SOURCES
     src/order.cpp
     src/orderbook.cpp
-    src/message.cpp
+    #src/message.cpp
 )
 
 set(HEADERS
     include/order.h
     include/orderbook.h
-    include/message.h
+    #include/message.h
 )
 
 # Create the library
