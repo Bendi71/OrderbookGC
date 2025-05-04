@@ -8,20 +8,16 @@ on:
 
 jobs:
   build:
-    name: Build on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        build_type: [Release]
+    name: Build on Ubuntu
+    runs-on: ubuntu-latest
+    env:
+      BUILD_TYPE: Release
 
     steps:
     - uses: actions/checkout@v3
 
-    # Install ASIO dependencies for Linux
-    - name: Install Dependencies (Linux)
-      if: runner.os == 'Linux'
+    # Install dependencies for Linux
+    - name: Install Dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y build-essential cmake
@@ -30,13 +26,17 @@ jobs:
       run: |
         mkdir -p build
         cd build
-        cmake -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} ..
+        cmake -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} ..
 
     - name: Build
       run: |
         cd build
-        cmake --build . --config ${{ matrix.build_type }}
+        cmake --build . --config ${{ env.BUILD_TYPE }}
 
     - name: List build artifacts
       run: |
-        ls -la build/bin
+        echo "Built files:"
+        find build -type f -name "*.so" -o -type f -executable | grep -v CMakeFiles | sort
+        
+        echo "Directory structure:"
+        find build -type d | sort
