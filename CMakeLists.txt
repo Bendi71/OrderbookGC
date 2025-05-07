@@ -26,15 +26,6 @@ if(NOT asio_FOUND)
     add_compile_definitions(ASIO_STANDALONE)
 endif()
 
-# Add JSON support for web clients
-include(FetchContent)
-FetchContent_Declare(
-    json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG v3.11.2
-)
-FetchContent_MakeAvailable(json)
-
 # Always add common if it exists (required component)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/common)
     add_subdirectory(common)

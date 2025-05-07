@@ -7,11 +7,8 @@
 #include <memory>
 #include <chrono>
 #include <cstdint>
-#include <nlohmann/json.hpp>
 
 namespace orderbook {
-
-using json = nlohmann::json;
 
 // Message framing class to handle length-prefixed messages
 class MessageFrame {
@@ -43,11 +40,6 @@ public:
     
     // Size of the length prefix in bytes
     static constexpr size_t HEADER_SIZE = 4;
-    
-    // Frame a message from JSON for web clients
-    static std::vector<uint8_t> frameJsonMessage(const json& j) {
-        return frameMessage(j.dump());
-    }
 };
 
 enum class MessageType {
@@ -93,8 +85,6 @@ public:
     virtual MessageType getType() const = 0;
     
     virtual std::string serialize() const = 0;
-    
-    virtual json to_json() const = 0;
 };
 
 // Shared pointer type for messages
@@ -102,56 +92,6 @@ using MessagePtr = std::shared_ptr<Message>;
 
 // Parse a message from a string
 MessagePtr parseMessage(const std::string& data);
-
-// Parse a message from JSON
-MessagePtr parseJsonMessage(const json& data);
-
-class OrderSubmitMessage : public Message {
-public:
-    OrderSubmitMessage() = default;
-    
-    MessageType getType() const override { return MessageType::ORDER_SUBMIT; }
-    std::string serialize() const override;
-    
-    json to_json() const override {
-        json j;
-        j["type"] = messageTypeToString(getType());
-        j["client_id"] = client_id;
-        j["symbol"] = symbol;
-        j["side"] = (side == OrderSide::BUY) ? "BUY" : "SELL";
-        j["price"] = price;
-        j["quantity"] = quantity;
-        return j;
-    }
-    
-    std::string client_id;
-    std::string symbol;
-    OrderSide side;
-    double price;
-    uint32_t quantity;
-};
-
-// Order cancellation message
-class OrderCancelMessage : public Message {
-public:
-    OrderCancelMessage() = default;
-    OrderCancelMessage(const std::string& order_id, const std::string& client_id)
-        : order_id(order_id), client_id(client_id) {}
-    
-    MessageType getType() const override { return MessageType::ORDER_CANCEL; }
-    std::string serialize() const override;
-    
-    json to_json() const override {
-        json j;
-        j["type"] = messageTypeToString(getType());
-        j["order_id"] = order_id;
-        j["client_id"] = client_id;
-        return j;
-    }
-    
-    std::string order_id;
-    std::string client_id;
-};
 
 // Helper for time point conversion
 inline std::string timePointToIsoString(const std::chrono::system_clock::time_point& tp) {
@@ -184,6 +124,34 @@ inline std::chrono::system_clock::time_point isoStringToTimePoint(const std::str
     return tp;
 }
 
+class OrderSubmitMessage : public Message {
+public:
+    OrderSubmitMessage() = default;
+    
+    MessageType getType() const override { return MessageType::ORDER_SUBMIT; }
+    std::string serialize() const override;
+    
+    std::string client_id;
+    std::string symbol;
+    OrderSide side;
+    double price;
+    uint32_t quantity;
+};
+
+// Order cancellation message
+class OrderCancelMessage : public Message {
+public:
+    OrderCancelMessage() = default;
+    OrderCancelMessage(const std::string& order_id, const std::string& client_id)
+        : order_id(order_id), client_id(client_id) {}
+    
+    MessageType getType() const override { return MessageType::ORDER_CANCEL; }
+    std::string serialize() const override;
+    
+    std::string order_id;
+    std::string client_id;
+};
+
 // Order status message
 class OrderStatusMessage : public Message {
 public:
@@ -191,30 +159,6 @@ public:
     
     MessageType getType() const override { return MessageType::ORDER_STATUS; }
     std::string serialize() const override;
-    
-    json to_json() const override {
-        json j;
-        j["type"] = messageTypeToString(getType());
-        j["order_id"] = order_id;
-        j["client_id"] = client_id;
-        j["symbol"] = symbol;
-        j["side"] = (side == OrderSide::BUY) ? "BUY" : "SELL";
-        j["price"] = price;
-        j["quantity"] = quantity;
-        j["filled_quantity"] = filled_quantity;
-        
-        switch (status) {
-            case OrderStatus::PENDING: j["status"] = "PENDING"; break;
-            case OrderStatus::PARTIAL: j["status"] = "PARTIAL"; break;
-            case OrderStatus::FILLED: j["status"] = "FILLED"; break;
-            case OrderStatus::CANCELED: j["status"] = "CANCELED"; break;
-            case OrderStatus::REJECTED: j["status"] = "REJECTED"; break;
-            default: j["status"] = "UNKNOWN"; break;
-        }
-        
-        j["timestamp"] = timePointToIsoString(order_timestamp);
-        return j;
-    }
     
     std::string order_id;
     std::string client_id;
@@ -235,34 +179,6 @@ public:
     MessageType getType() const override { return MessageType::ORDERBOOK_SNAPSHOT; }
     std::string serialize() const override;
     
-    json to_json() const override {
-        json j;
-        j["type"] = messageTypeToString(getType());
-        j["symbol"] = symbol;
-        
-        json bids_json = json::array();
-        for (const auto& level : bids) {
-            json level_json;
-            level_json["price"] = level.price;
-            level_json["quantity"] = level.quantity;
-            level_json["order_count"] = level.order_count;
-            bids_json.push_back(level_json);
-        }
-        j["bids"] = bids_json;
-        
-        json asks_json = json::array();
-        for (const auto& level : asks) {
-            json level_json;
-            level_json["price"] = level.price;
-            level_json["quantity"] = level.quantity;
-            level_json["order_count"] = level.order_count;
-            asks_json.push_back(level_json);
-        }
-        j["asks"] = asks_json;
-        
-        return j;
-    }
-    
     std::string symbol;
     std::vector<PriceLevel> bids;
     std::vector<PriceLevel> asks;
@@ -275,18 +191,6 @@ public:
     
     MessageType getType() const override { return MessageType::TRADE_NOTIFICATION; }
     std::string serialize() const override;
-    
-    json to_json() const override {
-        json j;
-        j["type"] = messageTypeToString(getType());
-        j["buy_order_id"] = buy_order_id;
-        j["sell_order_id"] = sell_order_id;
-        j["symbol"] = symbol;
-        j["price"] = price;
-        j["quantity"] = quantity;
-        j["timestamp"] = timePointToIsoString(trade_timestamp);
-        return j;
-    }
     
     std::string buy_order_id;
     std::string sell_order_id;
@@ -305,14 +209,6 @@ public:
     MessageType getType() const override { return MessageType::ERROR_MSG; }
     std::string serialize() const override;
     
-    json to_json() const override {
-        json j;
-        j["type"] = messageTypeToString(getType());
-        j["error_code"] = error_code;
-        j["description"] = description;
-        return j;
-    }
-    
     std::string error_code;
     std::string description;
 };
@@ -324,13 +220,6 @@ public:
     
     MessageType getType() const override { return MessageType::SNAPSHOT_REQUEST; }
     std::string serialize() const override;
-    
-    json to_json() const override {
-        json j;
-        j["type"] = messageTypeToString(getType());
-        j["symbol"] = symbol;
-        return j;
-    }
     
     std::string symbol;
 };

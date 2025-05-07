@@ -28,13 +28,9 @@ target_include_directories(${LIBRARY_NAME}
 # Add compile definitions
 target_compile_definitions(${LIBRARY_NAME} PRIVATE ASIO_STANDALONE)
 
-# Add json library if needed
 find_package(Threads REQUIRED)
-if(TARGET nlohmann_json::nlohmann_json)
-    target_link_libraries(${LIBRARY_NAME} PRIVATE Threads::Threads nlohmann_json::nlohmann_json)
-else()
-    target_link_libraries(${LIBRARY_NAME} PRIVATE Threads::Threads)
-endif()
+target_link_libraries(${LIBRARY_NAME} PRIVATE Threads::Threads)
+
 # Set up installation
 install(TARGETS ${LIBRARY_NAME} EXPORT ${LIBRARY_NAME}Config
     ARCHIVE DESTINATION lib
