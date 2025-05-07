@@ -6,13 +6,13 @@ set(LIBRARY_NAME orderbook_common)
 set(SOURCES
     src/order.cpp
     src/orderbook.cpp
-    #src/message.cpp
+    src/message.cpp
 )
 
 set(HEADERS
     include/order.h
     include/orderbook.h
-    #include/message.h
+    include/message.h
 )
 
 # Create the library
@@ -30,7 +30,7 @@ target_compile_definitions(${LIBRARY_NAME} PRIVATE ASIO_STANDALONE)
 
 # Add networking libraries if needed
 find_package(Threads REQUIRED)
-target_link_libraries(${LIBRARY_NAME} PRIVATE Threads::Threads)
+target_link_libraries(${LIBRARY_NAME} PRIVATE Threads::Threads nlohmann_json::nlohmann_json)
 
 # Set up installation
 install(TARGETS ${LIBRARY_NAME} EXPORT ${LIBRARY_NAME}Config
