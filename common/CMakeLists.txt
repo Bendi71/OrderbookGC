@@ -6,13 +6,13 @@ set(LIBRARY_NAME orderbook_common)
 set(SOURCES
     src/order.cpp
     src/orderbook.cpp
-    #src/message.cpp
+    src/message.cpp
 )
 
 set(HEADERS
     include/order.h
     include/orderbook.h
-    #include/message.h
+    include/message.h
 )
 
 # Create the library
@@ -28,7 +28,6 @@ target_include_directories(${LIBRARY_NAME}
 # Add compile definitions
 target_compile_definitions(${LIBRARY_NAME} PRIVATE ASIO_STANDALONE)
 
-# Add networking libraries if needed
 find_package(Threads REQUIRED)
 target_link_libraries(${LIBRARY_NAME} PRIVATE Threads::Threads)
 
