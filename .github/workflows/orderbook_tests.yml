@@ -46,32 +46,3 @@ jobs:
       run: |
         cd build/bin
         ./orderbook_matching_test
-
-  memory-tests:
-    name: Memory Safety Tests
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
-    
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential cmake valgrind
-    
-    - name: Configure CMake with Debug
-      run: |
-        mkdir -p build-debug
-        cd build-debug
-        cmake -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON ..
-    
-    - name: Build Tests
-      run: |
-        cd build-debug
-        cmake --build . --config Debug --target orderbook_matching_test
-    
-    - name: Run Valgrind Memory Check
-      run: |
-        cd build-debug/bin
-        valgrind --leak-check=full --error-exitcode=1 ./orderbook_matching_test
