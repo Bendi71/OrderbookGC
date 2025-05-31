@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.16)
 
 set(LIBRARY_NAME orderbook_common)
 
+# Enable testing support
+option(BUILD_TESTS "Build tests for orderbook common library" OFF)
+
 # Collect source files
 set(SOURCES
     src/order.cpp
@@ -42,3 +45,9 @@ install(EXPORT ${LIBRARY_NAME}Config DESTINATION share/${LIBRARY_NAME}/cmake)
 
 # Set up export
 export(TARGETS ${LIBRARY_NAME} FILE ${LIBRARY_NAME}Config.cmake)
+
+# Add tests if enabled
+if(BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

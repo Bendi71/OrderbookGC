@@ -1,0 +1,48 @@
+name: Orderbook Integration Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'common/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'common/**'
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake
+    - name: Configure CMake
+      run: |
+        mkdir -p build
+        cd build
+        # Use standalone tests.cmake when only common directory is available
+        if [ -f ../CMakeLists.txt ]; then
+          # Full repo available
+          cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON ..
+        else
+          # Only common directory available
+          cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -P ../common/standalone_tests.cmake
+        fi
+    
+    - name: Build Tests
+      run: |
+        cd build
+        cmake --build . --config Release --target orderbook_matching_test
+    
+    - name: Run Integration Tests
+      run: |
+        cd build/bin
+        ./orderbook_matching_test
