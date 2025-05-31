@@ -3,7 +3,7 @@
 #include "order.h"
 #include <vector>
 #include <map>
-#include <set>
+#include <algorithm>
 #include <functional>
 #include <mutex>
 
@@ -20,8 +20,18 @@ public:
     using OrderCallback = std::function<void(const OrderPtr&)>;
     using TradeCallback = std::function<void(const Trade&)>;
     
-    explicit OrderBook(const std::string& symbol);
+    explicit OrderBook(const std::string& symbol, double tick_size = 0.01);
     ~OrderBook() = default;
+    
+    // Get and set the tick size
+    double getTickSize() const;
+    void setTickSize(double tick_size);
+    
+    // Round a price to the nearest valid tick
+    double roundToTickSize(double price) const;
+    
+    // Validates if a price adheres to the tick size
+    bool isValidPrice(double price) const;
     
     bool addOrder(const OrderPtr& order);
     
@@ -54,18 +64,17 @@ private:
     
     // Add an order to the appropriate side of the book
     void addOrderToBook(const OrderPtr& order);
-    
-    // Calculate price levels for a side of the book
+      // Calculate price levels for a side of the book
     std::vector<PriceLevel> calculatePriceLevels(
-        const std::map<double, std::set<OrderPtr, std::function<bool(const OrderPtr&, const OrderPtr&)>>>& orders,
+        const std::map<double, std::vector<OrderPtr>>& orders,
         int depth
     ) const;
 
-private:
-    std::string symbol_;
+private:    std::string symbol_;
+    double tick_size_;  // Minimum price increment
     std::map<std::string, OrderPtr> orders_by_id_;
-    std::map<double, std::set<OrderPtr, std::function<bool(const OrderPtr&, const OrderPtr&)>>> bids_;
-    std::map<double, std::set<OrderPtr, std::function<bool(const OrderPtr&, const OrderPtr&)>>> asks_;
+    std::map<double, std::vector<OrderPtr>> bids_;
+    std::map<double, std::vector<OrderPtr>> asks_;
     mutable std::mutex mutex_;
     OrderCallback order_callback_;
     TradeCallback trade_callback_;

@@ -1,43 +1,82 @@
 #include "orderbook.h"
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 
 namespace orderbook {
 
-OrderBook::OrderBook(const std::string& symbol)
+OrderBook::OrderBook(const std::string& symbol, double tick_size)
     : symbol_(symbol)
+    , tick_size_(tick_size > 0.0 ? tick_size : 0.01) // Default to 0.01 if invalid tick size
 {
 }
 
-bool OrderBook::addOrder(const OrderPtr& order) {
+double OrderBook::getTickSize() const {
     std::lock_guard<std::mutex> lock(mutex_);
+    return tick_size_;
+}
+
+void OrderBook::setTickSize(double tick_size) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (tick_size > 0.0) {
+        tick_size_ = tick_size;
+    }
+}
+
+double OrderBook::roundToTickSize(double price) const {
+    if (tick_size_ <= 0.0) return price; // Safety check
     
+    // Round to the nearest tick
+    return std::round(price / tick_size_) * tick_size_;
+}
+
+bool OrderBook::isValidPrice(double price) const {
+    // If no tick size defined, all prices are valid
+    if (tick_size_ <= 0.0) return true;
+    // Check if the price is a multiple of the tick size (within a small epsilon for floating point comparison)
+    const double epsilon = 1e-10; 
+    return std::fabs(std::fmod(price, tick_size_)) < epsilon || 
+           std::fabs(std::fmod(price, tick_size_) - tick_size_) < epsilon;
+}
+
+bool OrderBook::addOrder(const OrderPtr& order) {
     // if order is null or remaining quantity of order is 0
     if (!order || order->getRemainingQuantity() == 0) { 
         return false;
     }
     
-    // makes an iterator to find the order in the map by ID. if 
-    auto it = orders_by_id_.find(order->getId());
-    if (it != orders_by_id_.end()) {
-        return false;
-    }
+    bool should_notify = false;
     
-    // Add the order to the map for quick lookup
-    orders_by_id_[order->getId()] = order;
-    
-    // Try to match the order with existing orders
-    matchOrder(order);
-    
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        // makes an iterator to find the order in the map by ID. if 
+        auto it = orders_by_id_.find(order->getId());
+        if (it != orders_by_id_.end()) {
+            return false;
+        }
+        
+        // Add the order to the map for quick lookup
+        orders_by_id_[order->getId()] = order;
+        
+        // Try to match the order with existing orders
+        matchOrder(order);
+        
     // If the order is not fully filled, add it to the book
     if (order->getRemainingQuantity() > 0 && 
         order->getStatus() != OrderStatus::FILLED &&
         order->getStatus() != OrderStatus::CANCELED) {
         addOrderToBook(order);
+    } else {
+        // If the order is fully filled or canceled, remove it from the map
+        orders_by_id_.erase(order->getId());
+    }
+        
+        should_notify = (order_callback_ != nullptr);
     }
     
-    // Notify via callback
-    if (order_callback_) {
+    // Notify via callback outside the lock
+    if (should_notify) {
         order_callback_(order);
     }
     
@@ -45,40 +84,61 @@ bool OrderBook::addOrder(const OrderPtr& order) {
 }
 
 bool OrderBook::cancelOrder(const std::string& order_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    OrderPtr order;
+    bool should_notify = false;
     
-    auto it = orders_by_id_.find(order_id);
-    if (it == orders_by_id_.end()) {
-        return false;
-    }
-    
-    OrderPtr order = it->second; // if matches, then gets the order pointer
-    
-    if (!order->cancel()) {
-        return false;
-    }
-    
-    // Remove the order from the appropriate side of the book
-    if (order->getSide() == OrderSide::BUY) {
-        auto price_it = bids_.find(order->getPrice());
-        if (price_it != bids_.end()) {
-            price_it->second.erase(order);
-            if (price_it->second.empty()) {
-                bids_.erase(price_it);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        auto it = orders_by_id_.find(order_id);
+        if (it == orders_by_id_.end()) {
+            return false;
+        }
+        
+        order = it->second; // if matches, then gets the order pointer
+        
+        if (!order->cancel()) {
+            return false;
+        }
+        
+        // Remove the order from the appropriate side of the book
+        if (order->getSide() == OrderSide::BUY) {
+            auto price_it = bids_.find(order->getPrice());
+            if (price_it != bids_.end()) {
+                auto& orders_at_price = price_it->second;
+                auto order_it = std::find(orders_at_price.begin(), orders_at_price.end(), order);
+                if (order_it != orders_at_price.end()) {
+                    if (order_it != orders_at_price.end() - 1) {
+                        *order_it = std::move(orders_at_price.back());
+                    }
+                    orders_at_price.pop_back();
+                    if (orders_at_price.empty()) {
+                        bids_.erase(price_it);
+                    }
+                }
+            }
+        } else {
+            auto price_it = asks_.find(order->getPrice());
+            if (price_it != asks_.end()) {
+                auto& orders_at_price = price_it->second;
+                auto order_it = std::find(orders_at_price.begin(), orders_at_price.end(), order);
+                if (order_it != orders_at_price.end()) {
+                    if (order_it != orders_at_price.end() - 1) {
+                        *order_it = std::move(orders_at_price.back());
+                    }
+                    orders_at_price.pop_back();
+                    if (orders_at_price.empty()) {
+                        asks_.erase(price_it);
+                    }
+                }
             }
         }
-    } else {
-        auto price_it = asks_.find(order->getPrice());
-        if (price_it != asks_.end()) {
-            price_it->second.erase(order);
-            if (price_it->second.empty()) {
-                asks_.erase(price_it);
-            }
-        }
+        
+        should_notify = (order_callback_ != nullptr);
     }
     
-    // Notify via callback
-    if (order_callback_) {
+    // Notify via callback outside the lock
+    if (should_notify) {
         order_callback_(order);
     }
     
@@ -170,12 +230,9 @@ void OrderBook::matchOrder(const OrderPtr& order) {
             // Get the orders at this price level
             auto& orders_at_price = ask_it->second;
             
-            // Match with orders at this price level
-            auto order_it = orders_at_price.begin();
-            while (order_it != orders_at_price.end() && order->getRemainingQuantity() > 0) {
-                OrderPtr matching_order = *order_it;
-                
-                // Calculate the matching quantity
+            // Match with orders at this price level - iterate from beginning (oldest orders first)
+            for (size_t i = 0; i < orders_at_price.size() && order->getRemainingQuantity() > 0;) {
+                OrderPtr matching_order = orders_at_price[i];
                 uint32_t match_quantity = std::min(order->getRemainingQuantity(), 
                                                 matching_order->getRemainingQuantity());
                 
@@ -183,11 +240,15 @@ void OrderBook::matchOrder(const OrderPtr& order) {
                     executeTrade(order, matching_order, match_quantity);
                 }
                 
-                // If the matching order is fully filled, remove it
+                // If the matching order is fully filled, remove it efficiently
                 if (matching_order->getRemainingQuantity() == 0) {
-                    order_it = orders_at_price.erase(order_it);
+                    orders_by_id_.erase(matching_order->getId());
+                    if (i < orders_at_price.size() - 1) {
+                        orders_at_price[i] = std::move(orders_at_price.back());
+                    }
+                    orders_at_price.pop_back();
                 } else {
-                    ++order_it;
+                    ++i;
                 }
             }
             
@@ -209,12 +270,8 @@ void OrderBook::matchOrder(const OrderPtr& order) {
             // Get the orders at this price level
             auto& orders_at_price = bid_it->second;
             
-            // Match with orders at this price level
-            auto order_it = orders_at_price.begin();
-            while (order_it != orders_at_price.end() && order->getRemainingQuantity() > 0) {
-                OrderPtr matching_order = *order_it;
-                
-                // Calculate the matching quantity
+            for (size_t i = 0; i < orders_at_price.size() && order->getRemainingQuantity() > 0;) {
+                OrderPtr matching_order = orders_at_price[i];
                 uint32_t match_quantity = std::min(order->getRemainingQuantity(), 
                                                 matching_order->getRemainingQuantity());
                 
@@ -223,11 +280,16 @@ void OrderBook::matchOrder(const OrderPtr& order) {
                     executeTrade(matching_order, order, match_quantity);
                 }
                 
-                // If the matching order is fully filled, remove it
+                // If the matching order is fully filled, remove it efficiently
                 if (matching_order->getRemainingQuantity() == 0) {
-                    order_it = orders_at_price.erase(order_it);
+                    orders_by_id_.erase(matching_order->getId());
+                    
+                    if (i < orders_at_price.size() - 1) {
+                        orders_at_price[i] = std::move(orders_at_price.back());
+                    }
+                    orders_at_price.pop_back();
                 } else {
-                    ++order_it;
+                    ++i;
                 }
             }
             
@@ -240,10 +302,15 @@ void OrderBook::matchOrder(const OrderPtr& order) {
 }
 
 void OrderBook::executeTrade(const OrderPtr& buy_order, const OrderPtr& sell_order, uint32_t quantity) {
+    Trade trade;
+    bool should_notify_trade = false;
+    bool should_notify_orders = false;
+    
+    // Apply fills to orders
     buy_order->fill(quantity);
     sell_order->fill(quantity);
     
-    Trade trade;
+    // Create the trade object
     trade.buy_order_id = buy_order->getId();
     trade.sell_order_id = sell_order->getId();
     trade.symbol = symbol_;
@@ -251,55 +318,42 @@ void OrderBook::executeTrade(const OrderPtr& buy_order, const OrderPtr& sell_ord
     trade.quantity = quantity;
     trade.timestamp = std::chrono::system_clock::now();
     
-    // Notify via callback
-    if (trade_callback_) {
+    // Check if we need to notify
+    should_notify_trade = (trade_callback_ != nullptr);
+    should_notify_orders = (order_callback_ != nullptr);
+    
+    // Notify via callbacks outside the lock (called from matchOrder)
+    if (should_notify_trade) {
         trade_callback_(trade);
     }
     
-    // Notify order updates via callback
-    if (order_callback_) {
+    if (should_notify_orders) {
         order_callback_(buy_order);
         order_callback_(sell_order);
     }
-    
-    std::cout << "Trade executed: " << quantity << " @ " << trade.price 
-              << " (" << trade.buy_order_id << " <-> " << trade.sell_order_id << ")" << std::endl; //logging
 }
 
 void OrderBook::addOrderToBook(const OrderPtr& order) {
     if (order->getSide() == OrderSide::BUY) {
         auto& orders_at_price = bids_[order->getPrice()];
-        if (orders_at_price.empty()) {
-            // Create a new price level with a new order set
-            orders_at_price = std::set<OrderPtr, std::function<bool(const OrderPtr&, const OrderPtr&)>>(
-                [](const OrderPtr& a, const OrderPtr& b) {
-                    return a->getTimestamp() < b->getTimestamp();  // Time priority, FIFO
-                }
-            );
-        }
-        orders_at_price.insert(order);
+        
+        // Simply add the order to the end of the vector (maintains time priority)
+        orders_at_price.push_back(order);
     } else {
         auto& orders_at_price = asks_[order->getPrice()];
-        if (orders_at_price.empty()) {
-            // Create a new price level with a new order set
-            orders_at_price = std::set<OrderPtr, std::function<bool(const OrderPtr&, const OrderPtr&)>>(
-                [](const OrderPtr& a, const OrderPtr& b) {
-                    return a->getTimestamp() < b->getTimestamp();  // Time priority, FIFO
-                }
-            );
-        }
-        orders_at_price.insert(order);
+        
+        // Simply add the order to the end of the vector (maintains time priority)
+        orders_at_price.push_back(order);
     }
 }
 
 std::vector<PriceLevel> OrderBook::calculatePriceLevels(
-    const std::map<double, std::set<OrderPtr, std::function<bool(const OrderPtr&, const OrderPtr&)>>>& orders,
+    const std::map<double, std::vector<OrderPtr>>& orders,
     int depth) const {
     std::vector<PriceLevel> levels;
     levels.reserve(std::min(static_cast<size_t>(depth), orders.size()));
     
-    auto it = orders.begin();
-    if (orders.begin() == orders.end()) {
+    if (orders.empty()) {
         // Handle empty orders case
         return levels;
     }
