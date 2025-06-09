@@ -90,5 +90,7 @@ if(DOXYGEN_FOUND)
             COMMENT "Generating API documentation with Doxygen"
             VERBATIM
         )
+    else()
+        message(WARNING "Doxyfile.in not found, documentation will not be built")
     endif()
 endif()
