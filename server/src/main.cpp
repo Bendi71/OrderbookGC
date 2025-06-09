@@ -136,7 +136,7 @@ int main(int argc, char* argv[]) {
             enable_generator = true;
         } else if (arg == "-b" || arg == "--benchmark") {
             enable_generator = true;
-            bool benchmark_mode = true;
+            benchmark_mode = true;
             if (i + 1 < argc && argv[i+1][0] != '-') {
                 try {
                     int orders_per_second = std::stoi(argv[++i]);
