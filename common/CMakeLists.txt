@@ -10,12 +10,14 @@ set(SOURCES
     src/order.cpp
     src/orderbook.cpp
     src/message.cpp
+    src/uuid.cpp
 )
 
 set(HEADERS
     include/order.h
     include/orderbook.h
     include/message.h
+    include/uuid.h
 )
 
 # Create the library
