@@ -69,7 +69,6 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/client)
         )
     else()
         message(STATUS "Qt6 not found, client application will not be built")
-        include_directories(${Qt6Widgets_INCLUDE_DIRS})
         add_subdirectory(client)
         
         # Add a custom target to run the client after build
@@ -101,6 +100,6 @@ if(DOXYGEN_FOUND)
             VERBATIM
         )
     else()
-        message(WARNING "Doxyfile.in not found, documentation will not be built")
+        message(STATUS "Doxyfile.in not found, documentation will not be built")
     endif()
 endif()
