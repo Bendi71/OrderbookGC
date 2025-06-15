@@ -52,7 +52,14 @@ endif()
 
 # Optionally add client if it exists and Qt6 is found
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/client)
+    # Qt6 for the client application
+    find_package(Qt6 COMPONENTS Widgets QUIET)
+    if(Qt6_FOUND)
+        message(STATUS "Qt6 found at: ${Qt6_DIR} - building client component")
+        # Include directories for Qt
+        include_directories(${Qt6Widgets_INCLUDE_DIRS})
         add_subdirectory(client)
+        
         # Add a custom target to run the client after build
         add_custom_target(run_client
             COMMAND $<TARGET_FILE:orderbook_client>
@@ -60,6 +67,18 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/client)
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
             COMMENT "Running orderbook client"
         )
+    else()
+        message(STATUS "Qt6 not found, client application will not be built")
+        add_subdirectory(client)
+        
+        # Add a custom target to run the client after build
+        add_custom_target(run_client
+            COMMAND $<TARGET_FILE:orderbook_client>
+            DEPENDS orderbook_client
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+            COMMENT "Running orderbook client"
+        )
+    endif()
 else()
     message(STATUS "Client directory not found - skipping client build")
 endif()
