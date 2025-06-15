@@ -3,15 +3,15 @@ cmake_minimum_required(VERSION 3.16)
 set(TARGET_NAME orderbook_client)
 
 # Find required Qt packages with better error messages
-find_package(Qt6 COMPONENTS Widgets REQUIRED)
-if(NOT Qt6_FOUND)
-    message(FATAL_ERROR "Qt6 not found. Please set Qt6_DIR to your Qt6 installation's cmake directory.")
-endif()
+# find_package(Qt6 COMPONENTS Widgets REQUIRED)
+# if(NOT Qt6_FOUND)
+#     message(FATAL_ERROR "Qt6 not found. Please set Qt6_DIR to your Qt6 installation's cmake directory.")
+# endif()
 
 # Print Qt version information for debugging
-message(STATUS "Found Qt6 version: ${Qt6_VERSION}")
-message(STATUS "Using Qt6 from: ${Qt6_DIR}")
-message(STATUS "Qt6Widgets includes: ${Qt6Widgets_INCLUDE_DIRS}")
+# message(STATUS "Found Qt6 version: ${Qt6_VERSION}")
+# message(STATUS "Using Qt6 from: ${Qt6_DIR}")
+# message(STATUS "Qt6Widgets includes: ${Qt6Widgets_INCLUDE_DIRS}")
 
 # Set Qt specific CMake flags
 set(CMAKE_AUTOMOC ON)
@@ -42,7 +42,7 @@ target_include_directories(${TARGET_NAME}
 target_link_libraries(${TARGET_NAME} PRIVATE orderbook_common)
 
 # Link with Qt
-target_link_libraries(${TARGET_NAME} PRIVATE Qt6::Widgets)
+# target_link_libraries(${TARGET_NAME} PRIVATE Qt6::Widgets)
 
 # Find and link with required libraries
 find_package(Threads REQUIRED)
