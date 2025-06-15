@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 project(OrderbookSystem VERSION 1.0.0 LANGUAGES CXX)
 
 # Set C++ standard
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -69,6 +69,15 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/client)
         )
     else()
         message(STATUS "Qt6 not found, client application will not be built")
+        add_subdirectory(client)
+        
+        # Add a custom target to run the client after build
+        add_custom_target(run_client
+            COMMAND $<TARGET_FILE:orderbook_client>
+            DEPENDS orderbook_client
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+            COMMENT "Running orderbook client"
+        )
     endif()
 else()
     message(STATUS "Client directory not found - skipping client build")
@@ -91,6 +100,6 @@ if(DOXYGEN_FOUND)
             VERBATIM
         )
     else()
-        message(WARNING "Doxyfile.in not found, documentation will not be built")
+        message(STATUS "Doxyfile.in not found, documentation will not be built")
     endif()
 endif()
