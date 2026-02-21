@@ -94,14 +94,21 @@ using MessagePtr = std::shared_ptr<Message>;
 // Parse a message from a string
 MessagePtr parseMessage(const std::string& data);
 
-// Helper for time point conversion
+// Helper for time point conversion (thread-safe)
 inline std::string timePointToIsoString(const std::chrono::system_clock::time_point& tp) {
     auto time_t = std::chrono::system_clock::to_time_t(tp);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         tp.time_since_epoch()).count() % 1000;
     
+    std::tm tm = {};
+#ifdef _WIN32
+    gmtime_s(&tm, &time_t);
+#else
+    gmtime_r(&time_t, &tm);
+#endif
+    
     std::stringstream ss;
-    ss << std::put_time(std::gmtime(&time_t), "%FT%T");
+    ss << std::put_time(&tm, "%FT%T");
     ss << '.' << std::setfill('0') << std::setw(3) << ms << "Z";
     return ss.str();
 }
@@ -111,7 +118,12 @@ inline std::chrono::system_clock::time_point isoStringToTimePoint(const std::str
     std::stringstream ss(iso);
     ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
     
-    auto time_t = std::mktime(&tm);
+    // Use UTC-aware conversion to match gmtime formatting
+#ifdef _WIN32
+    auto time_t = _mkgmtime(&tm);
+#else
+    auto time_t = timegm(&tm);
+#endif
     auto tp = std::chrono::system_clock::from_time_t(time_t);
     
     // Extract milliseconds if present

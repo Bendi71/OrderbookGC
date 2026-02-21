@@ -5,6 +5,7 @@
 #include <atomic>
 #include <random>
 #include <functional>
+#include <mutex>
 
 namespace orderbook {
 
@@ -69,13 +70,14 @@ private:
     // Update the last price (call this when a trade happens)
     
     Config config_;
+    std::mutex config_mutex_;  // Protects config_ and distributions
     std::atomic<bool> running_{false};
     std::thread generator_thread_;
     std::mt19937 random_engine_;
     OrderCallback order_callback_;
     
-    // Reference price for generating new orders
-    double last_price_{100.0};
+    // Reference price for generating new orders (atomic for cross-thread access)
+    std::atomic<double> last_price_{100.0};
     
     // Random distributions for various order parameters
     std::uniform_int_distribution<> quantity_dist_;

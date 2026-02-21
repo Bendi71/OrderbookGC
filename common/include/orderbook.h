@@ -56,11 +56,16 @@ public:
     void setTradeCallback(TradeCallback callback) { trade_callback_ = callback; }
 
 private:
-    // Match a new order with existing orders
-    void matchOrder(const OrderPtr& order);
+    // Match a new order with existing orders, collecting events for deferred notification
+    void matchOrder(const OrderPtr& order,
+                    std::vector<Trade>& pending_trades,
+                    std::vector<OrderPtr>& pending_order_updates);
     
-    // Generate a trade from two matching orders
-    void executeTrade(const OrderPtr& buy_order, const OrderPtr& sell_order, uint32_t quantity);
+    // Record a trade from two matching orders (does not fire callbacks)
+    void executeTrade(const OrderPtr& buy_order, const OrderPtr& sell_order,
+                      uint32_t quantity, double price,
+                      std::vector<Trade>& pending_trades,
+                      std::vector<OrderPtr>& pending_order_updates);
     
     // Add an order to the appropriate side of the book
     void addOrderToBook(const OrderPtr& order);

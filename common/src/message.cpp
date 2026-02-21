@@ -6,14 +6,21 @@
 namespace orderbook {
 
 namespace {
-    // Convert a time_point to a string
+    // Convert a time_point to a string (thread-safe)
     std::string timePointToString(const std::chrono::system_clock::time_point& tp) {
         auto time_t = std::chrono::system_clock::to_time_t(tp);
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             tp.time_since_epoch()).count() % 1000;
         
+        std::tm tm = {};
+#ifdef _WIN32
+        localtime_s(&tm, &time_t);
+#else
+        localtime_r(&time_t, &tm);
+#endif
+        
         std::stringstream ss;
-        ss << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S")
+        ss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S")
            << '.' << std::setfill('0') << std::setw(3) << ms;
         return ss.str();
     }

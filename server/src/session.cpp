@@ -7,10 +7,9 @@ Session::Session(asio::ip::tcp::socket socket, MessageCallback callback)
     : socket_(std::move(socket))
     , message_callback_(callback)
     , read_state_(ReadState::HEADER)
-    , length_buffer_()
+    , length_buffer_({0})
+    , message_content_buffer_()
 {
-    // Initialize length_buffer_ and message_content_buffer_ to appropriate sizes
-    read_buffer_.resize(8192); // Keep this for backward compatibility
 }
 
 Session::~Session() {
@@ -32,32 +31,27 @@ void Session::sendMessage(const MessagePtr& message) {
     
     // Serialize the message to a string
     std::string serialized = message->serialize();
-
-    // Get a string representation of the socket's remote endpoint
-    std::string endpoint_str;
-    try {
-        auto endpoint = socket_.remote_endpoint();
-        endpoint_str = endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
-    } catch (const std::exception& e) {
-        endpoint_str = "[unknown endpoint]";
-    }
     
-    // Log what we're sending
-    std::cout << "Server sending message of type: " << messageTypeToString(message->getType()) 
-              << " to " << endpoint_str << " (" << serialized.size() << " bytes)" << std::endl;
-    
-    // Lock the mutex before accessing the queue
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    
-    // Frame the message and add it to the write queue
+    // Frame the message
     std::vector<uint8_t> framedMessage = frameMessage(serialized);
     
-    bool write_in_progress = !write_messages_.empty();
-    write_messages_.push_back(std::move(framedMessage));
+    bool should_start_write = false;
+    {
+        // Lock the mutex before accessing the queue
+        std::lock_guard<std::mutex> lock(write_mutex_);
+        
+        write_messages_.push_back(std::move(framedMessage));
+        
+        // If no write operation is in progress, start one
+        if (!writing_) {
+            writing_ = true;
+            should_start_write = true;
+        }
+    }
     
-    // If no write operation is in progress, start one
-    if (!write_in_progress && !writing_) {
-        doWrite();
+    // Start the write outside the lock to avoid recursive locking
+    if (should_start_write) {
+        doWriteNext();
     }
 }
 
@@ -65,33 +59,18 @@ void Session::close() {
     // Close the socket if it's open
     if (socket_.is_open()) {
         try {
-            std::cout << "SERVER DEBUG: Closing session for client: ";
-            try {
-                auto endpoint = socket_.remote_endpoint();
-                std::cout << endpoint.address().to_string() << ":" << endpoint.port() << std::endl;
-            } catch (const std::exception& e) {
-                std::cout << "[unknown endpoint - " << e.what() << "]" << std::endl;
+            // Cancel any pending write operations under lock
+            {
+                std::lock_guard<std::mutex> lock(write_mutex_);
+                writing_ = false;
             }
-        asio::error_code ec;
-
-        if (!write_messages_.empty()) {
-                std::cout << "SERVER DEBUG: Flushing " << write_messages_.size() 
-                          << " pending messages before closing" << std::endl;
-                // We don't actually wait for them to complete since the client might be gone
-            }
-        socket_.shutdown(asio::ip::tcp::socket::shutdown_both, ec);
-        if (ec) {
-                std::cerr << "Socket shutdown error: " << ec.message() << std::endl;
-            }
-        socket_.close(ec);
-        if (ec) {
-                std::cerr << "Socket close error: " << ec.message() << std::endl;
-            }
+            
+            asio::error_code ec;
+            socket_.shutdown(asio::ip::tcp::socket::shutdown_both, ec);
+            socket_.close(ec);
         } catch (const std::exception& e) {
             std::cerr << "Exception during session close: " << e.what() << std::endl;
         }
-    } else {
-        std::cout << "SERVER DEBUG: Session already closed" << std::endl;
     }
 }
 
@@ -99,14 +78,6 @@ void Session::doRead() {
     auto self = shared_from_this();
     
     if (read_state_ == ReadState::HEADER) {
-        try {
-            std::cout << "SERVER DEBUG: Attempting to read message header from client: " 
-                    << socket_.remote_endpoint().address().to_string() << ":" 
-                    << socket_.remote_endpoint().port() << std::endl;
-        } catch (const std::exception& e) {
-            std::cout << "SERVER DEBUG: Attempting to read message header from unknown client (endpoint error: "
-                    << e.what() << ")" << std::endl;
-        }
         // Read the 4-byte length header
         asio::async_read(
             socket_,
@@ -115,7 +86,6 @@ void Session::doRead() {
                 if (!ec && bytes_transferred == MessageFrame::HEADER_SIZE) {
                     // Extract message length using the proper method from MessageFrame
                     uint32_t message_length = MessageFrame::extractLength(length_buffer_.data());
-                    std::cout << "Server reading header, message length: " << message_length << " bytes" << std::endl;
                     
                     // Validate the message length to prevent buffer overflow
                     if (message_length == 0 || message_length > 1024 * 1024) { // Max 1MB message size
@@ -134,25 +104,17 @@ void Session::doRead() {
                     asio::async_read(
                         socket_,
                         asio::buffer(message_content_buffer_),
-                        [this, self](std::error_code ec, std::size_t bytes_transferred) {
+                        [this, self](std::error_code ec, std::size_t /*bytes_transferred*/) {
                             if (!ec) {
                                 // Convert binary content to string
                                 std::string message_string(message_content_buffer_.begin(), message_content_buffer_.end());
-                                
-                                std::cout << "\n=== SERVER RECEIVED MESSAGE DETAILS ===" << std::endl;
-                                std::cout << "Raw message size: " << message_string.size() << " bytes" << std::endl;
 
                                 // Process the message
                                 try {
                                     MessagePtr message = parseMessage(message_string);
                                     if (message) {
-                                        std::cout << "Successfully parsed message of type: " << messageTypeToString(message->getType()) << std::endl;
                                         if (message_callback_) {
-                                            std::cout << "Calling message callback..." << std::endl;
                                             message_callback_(message, self);
-                                            std::cout << "Message callback completed" << std::endl;
-                                        } else {
-                                            std::cerr << "No message callback set!" << std::endl;
                                         }
                                     } else {
                                         std::cerr << "parseMessage returned null pointer" << std::endl;
@@ -179,7 +141,10 @@ void Session::doRead() {
                 } else {
                     // Handle error
                     if (ec != asio::error::eof) {
-                        std::cerr << "Error reading header: " << ec.message() << std::endl;
+                        std::cerr << "Error reading header: " << ec.message() << " (error code: " << ec.value() << ")" << std::endl;
+                        std::cerr << "Bytes transferred: " << bytes_transferred << " (expected: " << MessageFrame::HEADER_SIZE << ")" << std::endl;
+                    } else {
+                        std::cerr << "Connection closed by client (EOF while reading header)" << std::endl;
                     }
                     close();
                 }
@@ -192,22 +157,11 @@ void Session::doRead() {
     }
 }
 
-void Session::doWrite() {
+void Session::doWriteNext() {
     auto self = shared_from_this();
     
-    // Lock the mutex before accessing the queue
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    
-    // Check if the queue is empty
-    if (write_messages_.empty()) {
-        writing_ = false;
-        return;
-    }
-    
-    // Mark that we're writing
-    writing_ = true;
-    
-    // Write the message at the front of the queue
+    // No mutex lock here — writing_ is true, so only we touch the front of the queue.
+    // Other threads may push_back (which doesn't invalidate deque element references).
     asio::async_write(
         socket_,
         asio::buffer(write_messages_.front()),
@@ -216,22 +170,34 @@ void Session::doWrite() {
                 // Lock the mutex before modifying the queue
                 std::lock_guard<std::mutex> lock(write_mutex_);
                 
-                // Remove the message from the queue
+                // Remove the completed message
                 write_messages_.pop_front();
                 
-                // If there are more messages, continue writing
-                if (!write_messages_.empty()) {
-                    doWrite();
-                }
-                else {
-                    // No more messages, mark that we're not writing
+                if (write_messages_.empty()) {
                     writing_ = false;
+                    // Don't call doWriteNext — nothing to write
+                } else {
+                    // Unlock happens when lock_guard goes out of scope;
+                    // we can safely call doWriteNext after that.
+                    // But we need to call it outside the lock, so use a flag.
+                    // Actually, since we DON'T lock in doWriteNext, we can call it here.
+                    // The lock_guard will destruct at end of this block.
                 }
             }
             else {
-                // Handle error
-                std::cerr << "Error writing to socket: " << ec.message() << std::endl;
                 close();
+                return;
+            }
+            
+            // Check outside the lock scope whether we need to continue
+            // (lock_guard is destroyed at the end of the if block above)
+            bool more = false;
+            {
+                std::lock_guard<std::mutex> lock(write_mutex_);
+                more = writing_ && !write_messages_.empty();
+            }
+            if (more) {
+                doWriteNext();
             }
         });
 }

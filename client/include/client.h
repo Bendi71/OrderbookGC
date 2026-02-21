@@ -59,7 +59,8 @@ private:
     
     void write(const std::string& message);
     
-    void doWrite();
+    // Starts async write of the front message. Caller must NOT hold write_mutex_.
+    void doWriteNext();
     
     void handleData(const std::string& data);
     
@@ -68,9 +69,6 @@ private:
     asio::io_context io_context_;
     asio::ip::tcp::socket socket_;
     std::thread io_thread_;
-    
-    std::vector<char> read_buffer_;
-    std::string message_buffer_;
     
     // Fixed-size array for header to ensure proper memory alignment and fixed size
     std::array<uint8_t, MessageFrame::HEADER_SIZE> length_buffer_;

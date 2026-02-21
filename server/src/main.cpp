@@ -11,7 +11,6 @@ using namespace orderbook;
 // Global variables for graceful shutdown
 std::shared_ptr<Server> server;
 asio::io_context io_context;
-volatile std::sig_atomic_t shutdown_requested = 0;
 std::atomic<uint64_t> order_count{0};
 std::atomic<uint64_t> trade_count{0};
 std::chrono::steady_clock::time_point start_time;
@@ -40,12 +39,16 @@ void signal_handler(int signal) {
         }
         std::cout << "====================================\n";
     }
-    shutdown_requested = 1;
     
-    // Stop the server and io_context
+    // Stop the server first
     if (server) {
         server->stop();
     }
+    
+    // Give some time for cleanup before stopping io_context
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Stop the io_context
     io_context.stop();
 }
 
@@ -110,7 +113,7 @@ int main(int argc, char* argv[]) {
                 // If no valid symbols were provided, use the default ones
                 if (symbols.empty()) {
                     std::cerr << "Warning: No valid symbols provided, using default symbols\n";
-                    symbols = { "APPL"};
+                    symbols = {"AAPL"};
                 }
             } else {
                 std::cerr << "Error: Symbol list required after " << arg << "\n";
@@ -144,7 +147,7 @@ int main(int argc, char* argv[]) {
                     std::cerr << "Error: Invalid orders per second value\n";
                     return 1;
                 }
-            } 
+            }
         } else {
             std::cerr << "Error: Unknown option: " << arg << "\n";
             print_usage(argv[0]);
@@ -160,6 +163,9 @@ int main(int argc, char* argv[]) {
     try {
         // Create and start the server
         server = std::make_shared<Server>(io_context, port);
+        
+        // Set the snapshot interval
+        server->setSnapshotInterval(snapshot_interval_ms);
         
         // Create orderbooks for the specified symbols
         for (const auto& symbol : symbols) {
@@ -200,10 +206,9 @@ int main(int argc, char* argv[]) {
             
             orderGenerator->start();
             std::cout << "Order generator started for " << config.symbol << std::endl;
-        };
+        }
         // Start the server
         server->start();
-        server->startSnapshotTimer(snapshot_interval_ms);
         
         std::cout << "Orderbook server started on port " << port << std::endl;
         std::cout << "Created orderbooks for " << symbols.size() << " symbols: ";

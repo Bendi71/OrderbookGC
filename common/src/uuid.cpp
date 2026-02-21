@@ -5,10 +5,10 @@
 namespace orderbook {
 
 std::string generateUuid() {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis(0, 15);
-    std::uniform_int_distribution<> dis2(8, 11);
+    // Use thread_local to avoid re-creating RNG on every call
+    thread_local std::mt19937 gen(std::random_device{}());
+    thread_local std::uniform_int_distribution<> dis(0, 15);
+    thread_local std::uniform_int_distribution<> dis2(8, 11);
 
     std::stringstream ss;
     ss << std::hex;

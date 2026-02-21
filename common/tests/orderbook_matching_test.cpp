@@ -2,10 +2,16 @@
 #include <iostream>
 #include <vector>
 #include <cassert>
+#include <cmath>
 #include <memory>
 #include <string>
 
 using namespace orderbook;
+
+// Floating-point approximate comparison (avoids IEEE 754 representation mismatches)
+static bool approxEqual(double a, double b, double eps = 1e-9) {
+    return std::fabs(a - b) < eps;
+}
 
 // Helper function to generate order IDs
 std::string generateOrderId() {
@@ -102,20 +108,22 @@ bool testPricePriority() {
     // Verify best bid is highest price
     assert(book.getBestBidPrice() == 101.0);
     
-    // Add a matching sell order
+    // Add a matching sell order that should match at two price levels
     auto sell_order = createSellOrder(99.0, 15);
     book.addOrder(sell_order);
     
-    // Verify matching occurred with best price first
-    assert(executed_trades.size() == 1);
+    // Verify matching occurred: first with 101.0 (10 qty), then with 100.0 (5 qty)
+    assert(executed_trades.size() == 2);
     assert(executed_trades[0].quantity == 10);
-    assert(executed_trades[0].price == 101.0);
+    assert(executed_trades[0].price == 101.0);  // Resting order's price
+    assert(executed_trades[1].quantity == 5);
+    assert(executed_trades[1].price == 100.0);  // Resting order's price
     
     // Check remaining quantities
     assert(buy_order2->getRemainingQuantity() == 0);
     assert(buy_order1->getRemainingQuantity() == 5);
     assert(buy_order3->getRemainingQuantity() == 10);
-    assert(sell_order->getRemainingQuantity() == 5);
+    assert(sell_order->getRemainingQuantity() == 0);
     
     return success;
 }
@@ -165,11 +173,11 @@ bool testTickSizeRounding() {
     // Verify tick size is set correctly
     assert(book.getTickSize() == 0.05);
     
-    // Test price rounding
-    assert(book.roundToTickSize(100.02) == 100.0);
-    assert(book.roundToTickSize(100.03) == 100.05);
-    assert(book.roundToTickSize(100.074) == 100.05);
-    assert(book.roundToTickSize(100.075) == 100.1);
+    // Test price rounding (using approxEqual to avoid IEEE 754 representation mismatches)
+    assert(approxEqual(book.roundToTickSize(100.02), 100.0));
+    assert(approxEqual(book.roundToTickSize(100.03), 100.05));
+    assert(approxEqual(book.roundToTickSize(100.074), 100.05));
+    assert(approxEqual(book.roundToTickSize(100.075), 100.1));
     
     // Test price validation
     assert(book.isValidPrice(100.0) == true);
