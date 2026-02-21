@@ -58,12 +58,6 @@ private:
     std::array<uint8_t, 4> length_buffer_;
     std::vector<uint8_t> message_content_buffer_;
     
-    // Buffer for incoming data
-    std::vector<char> read_buffer_;
-    
-    // Buffer for accumulating partial messages
-    std::string message_buffer_;
-    
     // Queue of outgoing messages - important: these need to be binary vectors, not strings
     std::deque<std::vector<uint8_t>> write_messages_;
     std::mutex write_mutex_;
@@ -71,7 +65,8 @@ private:
     
     // Private methods
     void doRead();
-    void doWrite();
+    // Starts async write of the front message. Caller must NOT hold write_mutex_.
+    void doWriteNext();
     
     // Convert a string message to a framed binary message
     std::vector<uint8_t> frameMessage(const std::string& message);

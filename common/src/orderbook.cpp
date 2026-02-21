@@ -26,8 +26,11 @@ void OrderBook::setTickSize(double tick_size) {
 double OrderBook::roundToTickSize(double price) const {
     if (tick_size_ <= 0.0) return price; // Safety check
     
-    // Round to the nearest tick
-    return std::round(price / tick_size_) * tick_size_;
+    // Compute the number of ticks and round to the nearest integer.
+    // Using llround avoids intermediate floating-point storage issues
+    // that can cause std::round(double)*double to differ by an ULP.
+    long long ticks = std::llround(price / tick_size_);
+    return ticks * tick_size_;
 }
 
 bool OrderBook::isValidPrice(double price) const {
@@ -45,12 +48,13 @@ bool OrderBook::addOrder(const OrderPtr& order) {
         return false;
     }
     
-    bool should_notify = false;
+    // Vectors to collect events during matching (fired outside the lock)
+    std::vector<Trade> pending_trades;
+    std::vector<OrderPtr> pending_order_updates;
     
     {
         std::lock_guard<std::mutex> lock(mutex_);
         
-        // makes an iterator to find the order in the map by ID. if 
         auto it = orders_by_id_.find(order->getId());
         if (it != orders_by_id_.end()) {
             return false;
@@ -59,24 +63,33 @@ bool OrderBook::addOrder(const OrderPtr& order) {
         // Add the order to the map for quick lookup
         orders_by_id_[order->getId()] = order;
         
-        // Try to match the order with existing orders
-        matchOrder(order);
+        // Try to match the order with existing orders, collecting events
+        matchOrder(order, pending_trades, pending_order_updates);
         
-    // If the order is not fully filled, add it to the book
-    if (order->getRemainingQuantity() > 0 && 
-        order->getStatus() != OrderStatus::FILLED &&
-        order->getStatus() != OrderStatus::CANCELED) {
-        addOrderToBook(order);
-    } else {
-        // If the order is fully filled or canceled, remove it from the map
-        orders_by_id_.erase(order->getId());
-    }
-        
-        should_notify = (order_callback_ != nullptr);
+        // If the order is not fully filled, add it to the book
+        if (order->getRemainingQuantity() > 0 && 
+            order->getStatus() != OrderStatus::FILLED &&
+            order->getStatus() != OrderStatus::CANCELED) {
+            addOrderToBook(order);
+        } else {
+            // If the order is fully filled or canceled, remove it from the map
+            orders_by_id_.erase(order->getId());
+        }
     }
     
-    // Notify via callback outside the lock
-    if (should_notify) {
+    // Fire all callbacks OUTSIDE the lock to prevent deadlocks
+    for (const auto& trade : pending_trades) {
+        if (trade_callback_) {
+            trade_callback_(trade);
+        }
+    }
+    for (const auto& updated_order : pending_order_updates) {
+        if (order_callback_) {
+            order_callback_(updated_order);
+        }
+    }
+    // Notify about the incoming order itself (once, after all matching)
+    if (order_callback_) {
         order_callback_(order);
     }
     
@@ -85,7 +98,6 @@ bool OrderBook::addOrder(const OrderPtr& order) {
 
 bool OrderBook::cancelOrder(const std::string& order_id) {
     OrderPtr order;
-    bool should_notify = false;
     
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -95,11 +107,14 @@ bool OrderBook::cancelOrder(const std::string& order_id) {
             return false;
         }
         
-        order = it->second; // if matches, then gets the order pointer
+        order = it->second;
         
         if (!order->cancel()) {
             return false;
         }
+        
+        // Remove from orders_by_id_ to prevent memory leak
+        orders_by_id_.erase(it);
         
         // Remove the order from the appropriate side of the book
         if (order->getSide() == OrderSide::BUY) {
@@ -108,10 +123,7 @@ bool OrderBook::cancelOrder(const std::string& order_id) {
                 auto& orders_at_price = price_it->second;
                 auto order_it = std::find(orders_at_price.begin(), orders_at_price.end(), order);
                 if (order_it != orders_at_price.end()) {
-                    if (order_it != orders_at_price.end() - 1) {
-                        *order_it = std::move(orders_at_price.back());
-                    }
-                    orders_at_price.pop_back();
+                    orders_at_price.erase(order_it);  // Use erase to preserve FIFO ordering
                     if (orders_at_price.empty()) {
                         bids_.erase(price_it);
                     }
@@ -123,22 +135,17 @@ bool OrderBook::cancelOrder(const std::string& order_id) {
                 auto& orders_at_price = price_it->second;
                 auto order_it = std::find(orders_at_price.begin(), orders_at_price.end(), order);
                 if (order_it != orders_at_price.end()) {
-                    if (order_it != orders_at_price.end() - 1) {
-                        *order_it = std::move(orders_at_price.back());
-                    }
-                    orders_at_price.pop_back();
+                    orders_at_price.erase(order_it);  // Use erase to preserve FIFO ordering
                     if (orders_at_price.empty()) {
                         asks_.erase(price_it);
                     }
                 }
             }
         }
-        
-        should_notify = (order_callback_ != nullptr);
     }
     
     // Notify via callback outside the lock
-    if (should_notify) {
+    if (order_callback_) {
         order_callback_(order);
     }
     
@@ -216,7 +223,9 @@ double OrderBook::getBestAskVolume() const {
     return 0.0;
 }
 
-void OrderBook::matchOrder(const OrderPtr& order) {
+void OrderBook::matchOrder(const OrderPtr& order,
+                           std::vector<Trade>& pending_trades,
+                           std::vector<OrderPtr>& pending_order_updates) {
     if (order->getSide() == OrderSide::BUY) {
         // Match a buy order with existing sell orders
         while (order->getRemainingQuantity() > 0 && !asks_.empty()) {
@@ -230,25 +239,24 @@ void OrderBook::matchOrder(const OrderPtr& order) {
             // Get the orders at this price level
             auto& orders_at_price = ask_it->second;
             
-            // Match with orders at this price level - iterate from beginning (oldest orders first)
-            for (size_t i = 0; i < orders_at_price.size() && order->getRemainingQuantity() > 0;) {
-                OrderPtr matching_order = orders_at_price[i];
+            // Match with orders at this price level (front = oldest, FIFO)
+            while (!orders_at_price.empty() && order->getRemainingQuantity() > 0) {
+                OrderPtr& matching_order = orders_at_price.front();
                 uint32_t match_quantity = std::min(order->getRemainingQuantity(), 
                                                 matching_order->getRemainingQuantity());
                 
                 if (match_quantity > 0) {
-                    executeTrade(order, matching_order, match_quantity);
+                    executeTrade(order, matching_order, match_quantity,
+                                matching_order->getPrice(),
+                                pending_trades, pending_order_updates);
                 }
                 
-                // If the matching order is fully filled, remove it efficiently
+                // If the matching order is fully filled, remove from front (preserves FIFO)
                 if (matching_order->getRemainingQuantity() == 0) {
                     orders_by_id_.erase(matching_order->getId());
-                    if (i < orders_at_price.size() - 1) {
-                        orders_at_price[i] = std::move(orders_at_price.back());
-                    }
-                    orders_at_price.pop_back();
+                    orders_at_price.erase(orders_at_price.begin());
                 } else {
-                    ++i;
+                    break;  // Partially filled resting order stays
                 }
             }
             
@@ -270,26 +278,24 @@ void OrderBook::matchOrder(const OrderPtr& order) {
             // Get the orders at this price level
             auto& orders_at_price = bid_it->second;
             
-            for (size_t i = 0; i < orders_at_price.size() && order->getRemainingQuantity() > 0;) {
-                OrderPtr matching_order = orders_at_price[i];
+            // Match with orders at this price level (front = oldest, FIFO)
+            while (!orders_at_price.empty() && order->getRemainingQuantity() > 0) {
+                OrderPtr& matching_order = orders_at_price.front();
                 uint32_t match_quantity = std::min(order->getRemainingQuantity(), 
                                                 matching_order->getRemainingQuantity());
                 
                 if (match_quantity > 0) {
-                    // Execute the trade
-                    executeTrade(matching_order, order, match_quantity);
+                    executeTrade(matching_order, order, match_quantity,
+                                matching_order->getPrice(),
+                                pending_trades, pending_order_updates);
                 }
                 
-                // If the matching order is fully filled, remove it efficiently
+                // If the matching order is fully filled, remove from front (preserves FIFO)
                 if (matching_order->getRemainingQuantity() == 0) {
                     orders_by_id_.erase(matching_order->getId());
-                    
-                    if (i < orders_at_price.size() - 1) {
-                        orders_at_price[i] = std::move(orders_at_price.back());
-                    }
-                    orders_at_price.pop_back();
+                    orders_at_price.erase(orders_at_price.begin());
                 } else {
-                    ++i;
+                    break;  // Partially filled resting order stays
                 }
             }
             
@@ -301,36 +307,27 @@ void OrderBook::matchOrder(const OrderPtr& order) {
     }
 }
 
-void OrderBook::executeTrade(const OrderPtr& buy_order, const OrderPtr& sell_order, uint32_t quantity) {
-    Trade trade;
-    bool should_notify_trade = false;
-    bool should_notify_orders = false;
-    
+void OrderBook::executeTrade(const OrderPtr& buy_order, const OrderPtr& sell_order,
+                             uint32_t quantity, double price,
+                             std::vector<Trade>& pending_trades,
+                             std::vector<OrderPtr>& pending_order_updates) {
     // Apply fills to orders
     buy_order->fill(quantity);
     sell_order->fill(quantity);
     
     // Create the trade object
+    Trade trade;
     trade.buy_order_id = buy_order->getId();
     trade.sell_order_id = sell_order->getId();
     trade.symbol = symbol_;
-    trade.price = sell_order->getPrice();  // Use the seller's price
+    trade.price = price;  // Use the resting (passive) order's price
     trade.quantity = quantity;
     trade.timestamp = std::chrono::system_clock::now();
     
-    // Check if we need to notify
-    should_notify_trade = (trade_callback_ != nullptr);
-    should_notify_orders = (order_callback_ != nullptr);
-    
-    // Notify via callbacks outside the lock (called from matchOrder)
-    if (should_notify_trade) {
-        trade_callback_(trade);
-    }
-    
-    if (should_notify_orders) {
-        order_callback_(buy_order);
-        order_callback_(sell_order);
-    }
+    // Collect events for deferred callback invocation (outside lock)
+    pending_trades.push_back(std::move(trade));
+    pending_order_updates.push_back(buy_order);
+    pending_order_updates.push_back(sell_order);
 }
 
 void OrderBook::addOrderToBook(const OrderPtr& order) {

@@ -6,8 +6,9 @@ namespace orderbook {
 
 Client::Client()
     : socket_(io_context_)
-    , read_buffer_(8192)
     , read_state_(ReadState::HEADER)
+    , length_buffer_({0})
+    , message_content_buffer_()
 {
 }
 
@@ -36,7 +37,6 @@ bool Client::connect(const std::string& host, uint16_t port) {
             io_thread_ = std::thread(&Client::runIOContext, this);
             
             // Start reading from the socket
-            std::cout << "DEBUG: About to call startRead()" << std::endl;
             startRead();
             
             // Call the connection callback if set
@@ -135,13 +135,7 @@ void Client::requestOrderStatus(const std::string& order_id, const std::string& 
 }
 
 void Client::startRead() {
-
-    std::cout << "DEBUG: startRead called. running_=" << running_ 
-              << ", socket_.is_open()=" << socket_.is_open() << std::endl;
-
-
     if (!running_ || !socket_.is_open()) {
-        std::cout << "DEBUG: Exiting startRead early - socket not ready" << std::endl;
         return;
     }
     
@@ -149,8 +143,6 @@ void Client::startRead() {
     auto self = shared_from_this();
     
     if (read_state_ == ReadState::HEADER) {
-        std::cout << "Client reading message header..." << std::endl;
-        
         // Read the 4-byte length header using a fixed-size buffer
         asio::async_read(
             socket_,
@@ -159,8 +151,6 @@ void Client::startRead() {
                 if (!ec && bytes_transferred == MessageFrame::HEADER_SIZE) {
                     // Extract message length
                     uint32_t message_length = MessageFrame::extractLength(length_buffer_.data());
-                    std::cout << "Client received header, message length: " << message_length 
-                              << " bytes (read " << bytes_transferred << " header bytes)" << std::endl;
                     
                     // Validate the message length to prevent buffer overflow
                     if (message_length == 0 || message_length > 1024 * 1024) { // Max 1MB message size
@@ -183,20 +173,10 @@ void Client::startRead() {
                     asio::async_read(
                         socket_,
                         asio::buffer(message_content_buffer_),
-                        [this, self](std::error_code ec, std::size_t bytes_transferred) {
+                        [this, self](std::error_code ec, std::size_t /*bytes_transferred*/) {
                             if (!ec) {
-                                std::cout << "Successfully read " << bytes_transferred << " bytes of message content" << std::endl;
-                                
                                 // Convert binary content to string
                                 std::string message_string(message_content_buffer_.begin(), message_content_buffer_.end());
-                                
-                                // Log received message
-                                std::cout << "Client received message (" << message_string.size() << " bytes): ";
-                                if (message_string.size() < 100) {
-                                    std::cout << message_string << std::endl;
-                                } else {
-                                    std::cout << message_string.substr(0, 97) << "..." << std::endl;
-                                }
                                 
                                 // Process the message
                                 handleData(message_string);
@@ -247,80 +227,54 @@ void Client::write(const std::string& message) {
         return;
     }
     
-    // Add diagnostic logging
-    std::cout << "Client sending message (" << message.size() << " bytes): ";
-    if (message.size() < 100) {
-        std::cout << message << std::endl;
-    } else {
-        std::cout << message.substr(0, 97) << "..." << std::endl;
-    }
-    
     // Frame the message with length prefix
     std::vector<uint8_t> framedMessage = MessageFrame::frameMessage(message);
     
     // Post to io_context to ensure thread safety
     asio::post(io_context_, [this, framedMessage = std::move(framedMessage)]() mutable {
-        // Lock the mutex before accessing the queue
-        std::lock_guard<std::mutex> lock(write_mutex_);
-        
-        // Add the framed message to the queue
-        bool write_in_progress = !write_queue_.empty();
-        write_queue_.push_back(std::move(framedMessage));
-        
-        // If no write operation is in progress, start one
-        if (!write_in_progress && !writing_) {
-            doWrite();
+        bool should_start_write = false;
+        {
+            std::lock_guard<std::mutex> lock(write_mutex_);
+            write_queue_.push_back(std::move(framedMessage));
+            if (!writing_) {
+                writing_ = true;
+                should_start_write = true;
+            }
+        }
+        if (should_start_write) {
+            doWriteNext();
         }
     });
 }
 
-void Client::doWrite() {
+void Client::doWriteNext() {
     auto self = shared_from_this();
     
-    // Lock the mutex before accessing the queue
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    
-    // Check if the queue is empty
-    if (write_queue_.empty()) {
-        writing_ = false;
-        return;
-    }
-    
-    // Mark that we're writing
-    writing_ = true;
-    
-    // Take a reference to the message to ensure it remains valid during the async operation
-    const auto& message_ref = write_queue_.front();
-    
-    // Write the message at the front of the queue
+    // No mutex lock here — writing_ is true, so only we touch the front of the queue.
     asio::async_write(
         socket_,
-        asio::buffer(message_ref),
+        asio::buffer(write_queue_.front()),
         [this, self](std::error_code ec, std::size_t /*bytes_transferred*/) {
             if (!ec) {
-                // Lock the mutex before modifying the queue
-                std::lock_guard<std::mutex> lock(write_mutex_);
-                
-                // Remove the message from the queue
-                if (!write_queue_.empty()) {
-                    write_queue_.pop_front();
+                bool more = false;
+                {
+                    std::lock_guard<std::mutex> lock(write_mutex_);
+                    if (!write_queue_.empty()) {
+                        write_queue_.pop_front();
+                    }
+                    if (write_queue_.empty()) {
+                        writing_ = false;
+                    } else {
+                        more = true;
+                    }
                 }
-                
-                // If there are more messages, continue writing
-                if (!write_queue_.empty()) {
-                    doWrite();
-                }
-                else {
-                    // No more messages, mark that we're not writing
-                    writing_ = false;
+                if (more) {
+                    doWriteNext();
                 }
             }
             else {
-                // Handle error
-                std::cerr << "Write error: " << ec.message() << std::endl;
+                std::cerr << "CLIENT ERROR: Write error: " << ec.message() << std::endl;
                 connected_ = false;
-                
-                // Call the connection callback if set
                 if (connection_callback_) {
                     connection_callback_(false);
                 }
@@ -330,21 +284,11 @@ void Client::doWrite() {
 
 void Client::handleData(const std::string& data) {
     try {
-        std::cout << "Client parsing received message..." << std::endl;
-        
-        // Parse the message
         MessagePtr message = parseMessage(data);
         
         if (message) {
-            std::cout << "Successfully parsed message of type: " << messageTypeToString(message->getType()) << std::endl;
-            
-            // Call the message callback if set
             if (message_callback_) {
-                std::cout << "Calling message callback for type: " << messageTypeToString(message->getType()) << std::endl;
                 message_callback_(message);
-                std::cout << "Message callback completed" << std::endl;
-            } else {
-                std::cerr << "Warning: No message callback set!" << std::endl;
             }
         } else {
             std::cerr << "Error: parseMessage returned nullptr" << std::endl;
@@ -357,7 +301,6 @@ void Client::handleData(const std::string& data) {
 void Client::runIOContext() {
     try {
         asio::io_context::work work(io_context_);
-        std::cout << "DEBUG: io_context.run() starting" << std::endl;
         io_context_.run();
     } catch (const std::exception& e) {
         std::cerr << "IO context error: " << e.what() << std::endl;

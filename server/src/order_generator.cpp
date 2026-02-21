@@ -38,6 +38,7 @@ void OrderGenerator::stop() {
 }
 
 void OrderGenerator::setConfig(const Config& config) {
+    std::lock_guard<std::mutex> lock(config_mutex_);
     config_ = config;
     
     quantity_dist_ = std::uniform_int_distribution<>(config.min_quantity, config.max_quantity);
@@ -45,7 +46,7 @@ void OrderGenerator::setConfig(const Config& config) {
 }
 
 void OrderGenerator::updateLastPrice(double price) {
-    last_price_ = price;
+    last_price_.store(price, std::memory_order_relaxed);
 }
 
 void OrderGenerator::generatorLoop() {
@@ -60,14 +61,17 @@ void OrderGenerator::generatorLoop() {
         
         // Sleep for a random interval
         uint32_t interval_ms = interval_dist_(random_engine_);
-        std::this_thread::sleep_for(std::chrono::microseconds(interval_ms));
+        std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
     }
 }
 
 OrderPtr OrderGenerator::generateOrder() {    
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    
+    double current_price = last_price_.load(std::memory_order_relaxed);
     std::uniform_real_distribution<> price_dist(
-        last_price_ * (1 - config_.price_range), 
-        last_price_ * (1 + config_.price_range)
+        current_price * (1 - config_.price_range), 
+        current_price * (1 + config_.price_range)
     );
     double order_price = price_dist(random_engine_);
     double rounded_price = std::round(order_price / config_.tick_size) * config_.tick_size;

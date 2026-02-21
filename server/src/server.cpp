@@ -29,11 +29,13 @@ void Server::stop() {
     acceptor_.close();
     
     // Close all sessions
-    std::lock_guard<std::mutex> lock(sessions_mutex_);
-    for (auto& session : sessions_) {
-        session->close();
+    {
+        std::lock_guard<std::mutex> lock(sessions_mutex_);
+        for (auto& pair : sessions_) {
+            pair.second->close();
+        }
+        sessions_.clear();
     }
-    sessions_.clear();
     
     // Cancel the snapshot timer
     snapshot_timer_.cancel();
@@ -123,6 +125,8 @@ void Server::startSnapshotTimer(int interval_ms) {
             
             // Restart the timer
             startSnapshotTimer(snapshot_interval_ms_);
+        } else if (ec != asio::error::operation_aborted) {
+            std::cerr << "Snapshot timer error: " << ec.message() << std::endl;
         }
     });
 }
@@ -147,6 +151,11 @@ bool Server::setOrderbookTickSize(const std::string& symbol, double tick_size) {
 }
 
 void Server::acceptConnection() {
+    // Check if acceptor is still open before starting new accept
+    if (!acceptor_.is_open()) {
+        return;
+    }
+    
     acceptor_.async_accept(
         [this](std::error_code ec, asio::ip::tcp::socket socket) {
             if (!ec) {
@@ -183,23 +192,28 @@ void Server::acceptConnection() {
                 );
                 
                 // Generate a unique client ID
-                session->setClientId(orderbook::generateUuid());
+                std::string client_id = orderbook::generateUuid();
+                session->setClientId(client_id);
                 
-                // Add the session to the set of active sessions
+                // Add the session to the map of active sessions
                 {
                     std::lock_guard<std::mutex> lock(sessions_mutex_);
-                    sessions_.insert(session);
-                    std::cout << "SERVER DEBUG: Active sessions: " << sessions_.size() << std::endl;
+                    sessions_[client_id] = session;
                 }
                 
                 // Start the session
                 session->start();
             } else {
-                std::cerr << "SERVER ERROR: Failed to accept connection: " << ec.message() << std::endl;
+                // Only log error if it's not due to shutdown
+                if (ec != asio::error::operation_aborted) {
+                    std::cerr << "SERVER ERROR: Failed to accept connection: " << ec.message() << std::endl;
+                }
             }
             
-            // Accept the next connection
-            acceptConnection();
+            // Accept the next connection only if acceptor is still open
+            if (acceptor_.is_open()) {
+                acceptConnection();
+            }
         });
 }
 
@@ -448,6 +462,11 @@ void Server::onOrderUpdated(const OrderPtr& order) {
         auto it = order_owners_.find(order->getId());
         if (it != order_owners_.end()) {
             client_id = it->second;
+            // Clean up filled/cancelled orders from ownership map
+            if (order->getStatus() == OrderStatus::FILLED ||
+                order->getStatus() == OrderStatus::CANCELED) {
+                order_owners_.erase(it);
+            }
         }
     }
     
@@ -455,20 +474,17 @@ void Server::onOrderUpdated(const OrderPtr& order) {
         return;
     }
     
-    // Find the session for this client
+    // Find the session for this client (O(1) lookup)
     SessionPtr client_session;
     {
         std::lock_guard<std::mutex> lock(sessions_mutex_);
-        for (auto& session : sessions_) {
-            if (session->getClientId() == client_id) {
-                client_session = session;
-                break;
-            }
+        auto it = sessions_.find(client_id);
+        if (it != sessions_.end()) {
+            client_session = it->second;
         }
     }
     
     if (!client_session) {
-        std::cerr << "Session not found for client: " << client_id << std::endl;
         return;
     }
     
@@ -520,71 +536,95 @@ void Server::onTradeExecuted(const Trade& trade) {
     
     // Send trade notification to buyer
     if (!buyer_id.empty()) {
-        std::lock_guard<std::mutex> lock(sessions_mutex_);
-        for (auto& session : sessions_) {
-            if (session->getClientId() == buyer_id) {
-                session->sendMessage(trade_message);
-                break;
-            }
+        SessionPtr session;
+        {
+            std::lock_guard<std::mutex> lock(sessions_mutex_);
+            auto it = sessions_.find(buyer_id);
+            if (it != sessions_.end()) session = it->second;
         }
+        if (session) session->sendMessage(trade_message);
     }
     
     // Send trade notification to seller
     if (!seller_id.empty() && seller_id != buyer_id) {
-        std::lock_guard<std::mutex> lock(sessions_mutex_);
-        for (auto& session : sessions_) {
-            if (session->getClientId() == seller_id) {
-                session->sendMessage(trade_message);
-                break;
+        SessionPtr session;
+        {
+            std::lock_guard<std::mutex> lock(sessions_mutex_);
+            auto it = sessions_.find(seller_id);
+            if (it != sessions_.end()) session = it->second;
+        }
+        if (session) session->sendMessage(trade_message);
+    }
+}
+
+void Server::sendOrderbookSnapshots() {
+    // Step 1: Collect snapshot data while holding only orderbooks_mutex_
+    // This avoids holding orderbooks_mutex_ while acquiring sessions_mutex_ (lock ordering fix)
+    struct SnapshotData {
+        std::string symbol;
+        std::shared_ptr<OrderbookSnapshotMessage> message;
+    };
+    std::vector<SnapshotData> snapshots;
+    
+    {
+        std::lock_guard<std::mutex> orderbooks_lock(orderbooks_mutex_);
+        for (const auto& pair : orderbooks_) {
+            const std::string& symbol = pair.first;
+            const auto& orderbook = pair.second;
+            
+            auto snapshot_message = std::make_shared<OrderbookSnapshotMessage>();
+            snapshot_message->symbol = symbol;
+            
+            constexpr int max_levels = 10;
+            snapshot_message->bids = orderbook->getBidLevels(max_levels);
+            snapshot_message->asks = orderbook->getAskLevels(max_levels);
+            
+            snapshots.push_back({symbol, std::move(snapshot_message)});
+        }
+    }
+    
+    // Step 2: Distribute snapshots to subscribed clients
+    std::lock_guard<std::mutex> subscriptions_lock(subscriptions_mutex_);
+    std::lock_guard<std::mutex> sessions_lock(sessions_mutex_);
+    
+    for (const auto& snap : snapshots) {
+        for (const auto& sub_pair : subscriptions_) {
+            const std::string& client_id = sub_pair.first;
+            const std::set<std::string>& subscribed_symbols = sub_pair.second;
+            
+            if (subscribed_symbols.count(snap.symbol)) {
+                auto it = sessions_.find(client_id);
+                if (it != sessions_.end()) {
+                    it->second->sendMessage(snap.message);
+                }
             }
         }
     }
 }
 
-void Server::sendOrderbookSnapshots() {
-    std::lock_guard<std::mutex> orderbooks_lock(orderbooks_mutex_);
-    std::lock_guard<std::mutex> subscriptions_lock(subscriptions_mutex_);
-    std::lock_guard<std::mutex> sessions_lock(sessions_mutex_);
+void Server::removeSession(const SessionPtr& session) {
+    std::string client_id = session->getClientId();
     
-    // For each orderbook, send a snapshot to subscribed clients
-    for (const auto& pair : orderbooks_) {
-        const std::string& symbol = pair.first;
-        const auto& orderbook = pair.second;
-        
-        // Create a snapshot message for this orderbook
-        auto snapshot_message = std::make_shared<OrderbookSnapshotMessage>();
-        snapshot_message->symbol = symbol;
-        
-        // Get the top N levels of bids and asks
-        constexpr int max_levels = 10;
-        
-        // Add bid levels
-        auto bids = orderbook->getBidLevels(max_levels);
-        for (const auto& level : bids) {
-            snapshot_message->bids.push_back(level);
-        }
-        
-        // Add ask levels
-        auto asks = orderbook->getAskLevels(max_levels);
-        for (const auto& level : asks) {
-            snapshot_message->asks.push_back(level);
-        }
-        
-        // Send the snapshot to all subscribed clients
-        for (const auto& subscription_pair : subscriptions_) {
-            const std::string& client_id = subscription_pair.first;
-            const std::set<std::string>& subscribed_symbols = subscription_pair.second;
-            
-            // Check if the client is subscribed to this symbol
-            if (subscribed_symbols.find(symbol) != subscribed_symbols.end()) {
-                // Find the session for this client
-                for (const auto& session : sessions_) {
-                    if (session->getClientId() == client_id) {
-                        // Send the snapshot
-                        session->sendMessage(snapshot_message);
-                        break;
-                    }
-                }
+    // Remove from sessions
+    {
+        std::lock_guard<std::mutex> lock(sessions_mutex_);
+        sessions_.erase(client_id);
+    }
+    
+    // Remove subscriptions
+    {
+        std::lock_guard<std::mutex> lock(subscriptions_mutex_);
+        subscriptions_.erase(client_id);
+    }
+    
+    // Remove order ownership entries for this client
+    {
+        std::lock_guard<std::mutex> lock(order_owners_mutex_);
+        for (auto it = order_owners_.begin(); it != order_owners_.end(); ) {
+            if (it->second == client_id) {
+                it = order_owners_.erase(it);
+            } else {
+                ++it;
             }
         }
     }

@@ -6,6 +6,7 @@
 #include <asio.hpp>
 #include <string>
 #include <map>
+#include <unordered_map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -44,6 +45,9 @@ public:
     // Configure the built-in order generator
     void configureOrderGenerator(const OrderGenerator::Config& config);
     
+    // Set the snapshot interval
+    void setSnapshotInterval(int interval_ms) { snapshot_interval_ms_ = interval_ms; }
+    
 private:
     // Accept a new connection
     void acceptConnection();
@@ -60,6 +64,9 @@ private:
     
     // Handle order status request
     void handleOrderStatus(const std::shared_ptr<OrderStatusMessage>& message, SessionPtr session);
+    
+    // Remove a disconnected session and clean up its resources
+    void removeSession(const SessionPtr& session);
     
     // Callback for order updates
     void onOrderUpdated(const OrderPtr& order);
@@ -79,8 +86,8 @@ private:
     std::map<std::string, std::shared_ptr<OrderBook>> orderbooks_;
     mutable std::mutex orderbooks_mutex_;
     
-    // Set of active client sessions
-    std::set<SessionPtr> sessions_;
+    // Map of client_id to active session (O(1) lookup)
+    std::unordered_map<std::string, SessionPtr> sessions_;
     std::mutex sessions_mutex_;
     
     // Map of session ID to subscribed symbols
