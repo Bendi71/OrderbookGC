@@ -185,6 +185,9 @@ int main(int argc, char* argv[]) {
             config.min_interval_ms = 1;
             config.max_interval_ms = 10;
             config.buy_probability = 0.55;
+            config.cancel_probability = 0.3;   // 30% chance to cancel after each new order
+            config.spread_factor = 0.005;       // Spread-aware side selection
+            config.max_tracked_orders = 500;
 
             orderGenerator = std::make_shared<OrderGenerator>(config);
             orderGenerator->setOrderCallback([&](const OrderPtr& order) {
@@ -195,11 +198,22 @@ int main(int argc, char* argv[]) {
                 }
             });
 
+            // Cancel callback: cancel on the orderbook directly
+            orderGenerator->setCancelCallback([&](const std::string& order_id) -> bool {
+                auto orderbook = server->getOrderbook(symbols[0]);
+                if (orderbook) {
+                    return orderbook->cancelOrder(order_id);
+                }
+                return false;
+            });
+
             for (const auto& symbol : symbols) {
                 auto orderbook = server->getOrderbook(symbol);
                 if (orderbook) {
-                    orderbook->setTradeCallback([&](const Trade& trade) {
+                    orderbook->setTradeCallback([&, gen = orderGenerator](const Trade& trade) {
                         trade_count++;
+                        // Feed last price back to generator so the price walk works
+                        gen->updateLastPrice(trade.price);
                     });
                 }
             }
