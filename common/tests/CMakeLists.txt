@@ -90,3 +90,19 @@ set_target_properties(order_test PROPERTIES
 )
 add_test(NAME OrderTest COMMAND order_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# --- Market order tests ---
+add_executable(market_order_test
+    market_order_test.cpp
+)
+target_link_libraries(market_order_test
+    PRIVATE orderbook_common GTest::gtest_main
+)
+target_include_directories(market_order_test
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+set_target_properties(market_order_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+add_test(NAME MarketOrderTest COMMAND market_order_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

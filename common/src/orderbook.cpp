@@ -66,11 +66,18 @@ bool OrderBook::addOrder(const OrderPtr& order) {
         // Try to match the order with existing orders, collecting events
         matchOrder(order, pending_trades, pending_order_updates);
         
-        // If the order is not fully filled, add it to the book
+        // If the order is not fully filled, add it to the book (limit only)
+        // Market orders never rest — cancel any unfilled remainder
         if (order->getRemainingQuantity() > 0 && 
             order->getStatus() != OrderStatus::FILLED &&
             order->getStatus() != OrderStatus::CANCELED) {
-            addOrderToBook(order);
+            if (order->getOrderType() == OrderType::MARKET) {
+                // Market order with unfilled qty → cancel the remainder
+                order->cancel();
+                orders_by_id_.erase(order->getId());
+            } else {
+                addOrderToBook(order);
+            }
         } else {
             // If the order is fully filled or canceled, remove it from the map
             orders_by_id_.erase(order->getId());
@@ -226,13 +233,15 @@ double OrderBook::getBestAskVolume() const {
 void OrderBook::matchOrder(const OrderPtr& order,
                            std::vector<Trade>& pending_trades,
                            std::vector<OrderPtr>& pending_order_updates) {
+    const bool is_market = order->getOrderType() == OrderType::MARKET;
+
     if (order->getSide() == OrderSide::BUY) {
         // Match a buy order with existing sell orders
         while (order->getRemainingQuantity() > 0 && !asks_.empty()) {
             auto ask_it = asks_.begin();  // Get the lowest ask price
             
-            // Check if the buy price is >= the lowest ask price
-            if (order->getPrice() < ask_it->first) {
+            // Limit orders check price; market orders skip the check
+            if (!is_market && order->getPrice() < ask_it->first) {
                 break;  // No match possible
             }
             
@@ -270,8 +279,8 @@ void OrderBook::matchOrder(const OrderPtr& order,
         while (order->getRemainingQuantity() > 0 && !bids_.empty()) {
             auto bid_it = bids_.rbegin();  // Get the highest bid price
             
-            // Check if the sell price is <= the highest bid price
-            if (order->getPrice() > bid_it->first) {
+            // Limit orders check price; market orders skip the check
+            if (!is_market && order->getPrice() > bid_it->first) {
                 break;  // No match possible
             }
             

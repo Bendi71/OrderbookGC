@@ -97,6 +97,16 @@ namespace {
         }
         return OrderStatus::PENDING;
     }
+
+    // Specialization for OrderType
+    template<>
+    OrderType extractEnum<OrderType>(const std::string& line) {
+        std::string value = extractString(line);
+        if (value == "MARKET") {
+            return OrderType::MARKET;
+        }
+        return OrderType::LIMIT;
+    }
 }
 
 MessagePtr parseMessage(const std::string& data) {
@@ -120,6 +130,8 @@ MessagePtr parseMessage(const std::string& data) {
                 message->symbol = extractString(line);
             } else if (line.find("side=") == 0) {
                 message->side = extractEnum<OrderSide>(line);
+            } else if (line.find("order_type=") == 0) {
+                message->order_type = extractEnum<OrderType>(line);
             } else if (line.find("price=") == 0) {
                 message->price = extractValue<double>(line);
             } else if (line.find("quantity=") == 0) {
@@ -160,6 +172,8 @@ MessagePtr parseMessage(const std::string& data) {
                 message->filled_quantity = extractValue<uint32_t>(line);
             } else if (line.find("status=") == 0) {
                 message->status = extractEnum<OrderStatus>(line);
+            } else if (line.find("order_type=") == 0) {
+                message->order_type = extractEnum<OrderType>(line);
             } else if (line.find("timestamp=") == 0) {
                 message->order_timestamp = stringToTimePoint(extractString(line));
             }
@@ -258,6 +272,7 @@ std::string OrderSubmitMessage::serialize() const {
     ss << "client_id=" << client_id << "\n";
     ss << "symbol=" << symbol << "\n";
     ss << "side=" << (side == OrderSide::BUY ? "BUY" : "SELL") << "\n";
+    ss << "order_type=" << (order_type == OrderType::MARKET ? "MARKET" : "LIMIT") << "\n";
     ss << "price=" << std::fixed << std::setprecision(2) << price << "\n";
     ss << "quantity=" << quantity;
     
@@ -282,6 +297,7 @@ std::string OrderStatusMessage::serialize() const {
     ss << "client_id=" << client_id << "\n";
     ss << "symbol=" << symbol << "\n";
     ss << "side=" << (side == OrderSide::BUY ? "BUY" : "SELL") << "\n";
+    ss << "order_type=" << (order_type == OrderType::MARKET ? "MARKET" : "LIMIT") << "\n";
     ss << "price=" << std::fixed << std::setprecision(2) << price << "\n";
     ss << "quantity=" << quantity << "\n";
     ss << "filled_quantity=" << filled_quantity << "\n";
