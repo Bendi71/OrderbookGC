@@ -7,11 +7,13 @@ Order::Order(const std::string& id,
              double price,
              uint32_t quantity,
              const std::string& symbol,
-             const std::string& client_id)
+             const std::string& client_id,
+             OrderType type)
     : id_(id)
     , client_id_(client_id)
     , symbol_(symbol)
     , side_(side)
+    , order_type_(type)
     , price_(price)
     , quantity_(quantity)
     , remaining_quantity_(quantity)

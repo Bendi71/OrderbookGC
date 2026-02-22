@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 set(LIBRARY_NAME orderbook_common)
 
 # Enable testing support
-option(BUILD_TESTS "Build tests for orderbook common library" OFF)
+option(BUILD_TESTS "Build tests for orderbook common library" ON)
 
 # Collect source files
 set(SOURCES

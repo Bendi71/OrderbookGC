@@ -11,6 +11,11 @@ enum class OrderSide {
     SELL
 };
 
+enum class OrderType {
+    LIMIT,
+    MARKET
+};
+
 enum class OrderStatus {
     PENDING,
     PARTIAL,
@@ -26,12 +31,14 @@ public:
           double price,
           uint32_t quantity,
           const std::string& symbol,
-          const std::string& client_id);
+          const std::string& client_id,
+          OrderType type = OrderType::LIMIT);
     
     const std::string& getId() const { return id_; }
     const std::string& getClientId() const { return client_id_; }
     const std::string& getSymbol() const { return symbol_; }
     OrderSide getSide() const { return side_; }
+    OrderType getOrderType() const { return order_type_; }
     double getPrice() const { return price_; }
     uint32_t getQuantity() const { return quantity_; }
     uint32_t getRemainingQuantity() const { return remaining_quantity_; }
@@ -51,6 +58,7 @@ private:
     std::string client_id_;        
     std::string symbol_;             
     OrderSide side_;              
+    OrderType order_type_;
     double price_;               
     uint32_t quantity_;               
     uint32_t remaining_quantity_;     

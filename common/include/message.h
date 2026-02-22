@@ -147,6 +147,7 @@ public:
     std::string client_id;
     std::string symbol;
     OrderSide side;
+    OrderType order_type = OrderType::LIMIT;
     double price;
     uint32_t quantity;
 };
@@ -177,6 +178,7 @@ public:
     std::string client_id;
     std::string symbol;
     OrderSide side;
+    OrderType order_type = OrderType::LIMIT;
     double price;
     uint32_t quantity;
     uint32_t filled_quantity;
