@@ -264,14 +264,18 @@ void Server::handleOrderSubmit(const std::shared_ptr<OrderSubmitMessage>& messag
         subscriptions_[session->getClientId()].insert(message->symbol);
     }
     
+    // Market orders use price 0 as a sentinel — the matching engine ignores it
+    double order_price = (message->order_type == OrderType::MARKET) ? 0.0 : message->price;
+
     // Create a new order
     auto order = std::make_shared<Order>(
         orderbook::generateUuid(),
         message->side,
-        message->price,
+        order_price,
         message->quantity,
         message->symbol,
-        message->client_id
+        message->client_id,
+        message->order_type
     );
     
     // Add the order to the orderbook
@@ -289,6 +293,7 @@ void Server::handleOrderSubmit(const std::shared_ptr<OrderSubmitMessage>& messag
     status_message->client_id = order->getClientId();
     status_message->symbol = order->getSymbol();
     status_message->side = order->getSide();
+    status_message->order_type = order->getOrderType();
     status_message->price = order->getPrice();
     status_message->quantity = order->getQuantity();
     status_message->filled_quantity = order->getQuantity() - order->getRemainingQuantity();
@@ -299,13 +304,16 @@ void Server::handleOrderSubmit(const std::shared_ptr<OrderSubmitMessage>& messag
 }
 
 void Server::handleOrderCancel(const std::shared_ptr<OrderCancelMessage>& message, SessionPtr session) {
-    // Check if the client owns the order
+    // Check if the client owns the order — compare against the session's
+    // server-assigned client ID, not the message's client_id field, because
+    // ownership is recorded with session->getClientId() in handleOrderSubmit.
     {
         std::lock_guard<std::mutex> lock(order_owners_mutex_);
         auto it = order_owners_.find(message->order_id);
-        if (it == order_owners_.end() || it->second != message->client_id) {
-            std::cerr << "Client " << message->client_id << " tried to cancel order " 
-                      << message->order_id << " which they don't own" << std::endl;
+        if (it == order_owners_.end() || it->second != session->getClientId()) {
+            std::cerr << "Client " << session->getClientId() << " (msg: " << message->client_id
+                      << ") tried to cancel order " << message->order_id
+                      << " which they don't own" << std::endl;
             session->sendMessage(std::make_shared<ErrorMessage>(
                 "INVALID_ORDER", 
                 "Cannot cancel order: not found or not owned by this client"));
@@ -441,6 +449,7 @@ void Server::handleOrderStatus(const std::shared_ptr<OrderStatusMessage>& messag
     status_message->client_id = found_order->getClientId();
     status_message->symbol = found_order->getSymbol();
     status_message->side = found_order->getSide();
+    status_message->order_type = found_order->getOrderType();
     status_message->price = found_order->getPrice();
     status_message->quantity = found_order->getQuantity();
     status_message->filled_quantity = found_order->getQuantity() - found_order->getRemainingQuantity();
@@ -494,6 +503,7 @@ void Server::onOrderUpdated(const OrderPtr& order) {
     status_message->client_id = order->getClientId();
     status_message->symbol = order->getSymbol();
     status_message->side = order->getSide();
+    status_message->order_type = order->getOrderType();
     status_message->price = order->getPrice();
     status_message->quantity = order->getQuantity();
     status_message->filled_quantity = order->getQuantity() - order->getRemainingQuantity();
@@ -508,7 +518,8 @@ void Server::onTradeExecuted(const Trade& trade) {
         order_generator_->updateLastPrice(trade.price);
     }
 
-    // Send trade notifications to the clients involved in the trade
+    // Build trade notification once, broadcast to all subscribers of this symbol.
+    // This is standard market-data behaviour: all participants see all trades.
     auto trade_message = std::make_shared<TradeNotificationMessage>();
     trade_message->buy_order_id = trade.buy_order_id;
     trade_message->sell_order_id = trade.sell_order_id;
@@ -516,44 +527,24 @@ void Server::onTradeExecuted(const Trade& trade) {
     trade_message->price = trade.price;
     trade_message->quantity = trade.quantity;
     trade_message->trade_timestamp = trade.timestamp;
-    
-    // Find the clients that own these orders
-    std::string buyer_id;
-    std::string seller_id;
-    
+
+    // Collect sessions subscribed to this symbol
+    std::vector<SessionPtr> recipients;
     {
-        std::lock_guard<std::mutex> lock(order_owners_mutex_);
-        auto buy_it = order_owners_.find(trade.buy_order_id);
-        if (buy_it != order_owners_.end()) {
-            buyer_id = buy_it->second;
-        }
-        
-        auto sell_it = order_owners_.find(trade.sell_order_id);
-        if (sell_it != order_owners_.end()) {
-            seller_id = sell_it->second;
+        std::lock_guard<std::mutex> sub_lock(subscriptions_mutex_);
+        std::lock_guard<std::mutex> ses_lock(sessions_mutex_);
+        for (const auto& [client_id, syms] : subscriptions_) {
+            if (syms.count(trade.symbol)) {
+                auto it = sessions_.find(client_id);
+                if (it != sessions_.end()) {
+                    recipients.push_back(it->second);
+                }
+            }
         }
     }
-    
-    // Send trade notification to buyer
-    if (!buyer_id.empty()) {
-        SessionPtr session;
-        {
-            std::lock_guard<std::mutex> lock(sessions_mutex_);
-            auto it = sessions_.find(buyer_id);
-            if (it != sessions_.end()) session = it->second;
-        }
-        if (session) session->sendMessage(trade_message);
-    }
-    
-    // Send trade notification to seller
-    if (!seller_id.empty() && seller_id != buyer_id) {
-        SessionPtr session;
-        {
-            std::lock_guard<std::mutex> lock(sessions_mutex_);
-            auto it = sessions_.find(seller_id);
-            if (it != sessions_.end()) session = it->second;
-        }
-        if (session) session->sendMessage(trade_message);
+
+    for (const auto& session : recipients) {
+        session->sendMessage(trade_message);
     }
 }
 
