@@ -5,10 +5,14 @@ on:
     branches: [ main ]
     paths:
       - 'common/**'
+      - 'server/**'
+      - 'CMakeLists.txt'
   pull_request:
     branches: [ main ]
     paths:
       - 'common/**'
+      - 'server/**'
+      - 'CMakeLists.txt'
   workflow_dispatch:  # Allow manual triggering
 
 jobs:
@@ -28,21 +32,29 @@ jobs:
       run: |
         mkdir -p build
         cd build
-        # Use standalone tests.cmake when only common directory is available
-        if [ -f ../CMakeLists.txt ]; then
-          # Full repo available
-          cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON ..
-        else
-          # Only common directory available
-          cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -P ../common/standalone_tests.cmake
-        fi
+        cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON ..
     
     - name: Build Tests
       run: |
         cd build
-        cmake --build . --config Release --target orderbook_matching_test
+        cmake --build . --config Release
     
-    - name: Run Integration Tests
+    - name: Run All Tests
+      run: |
+        cd build
+        ctest --output-on-failure -C Release
+
+    - name: Run Individual Test Suites
+      if: always()
       run: |
         cd build/bin
-        ./orderbook_matching_test
+        echo "=== Orderbook Matching Tests ==="
+        ./orderbook_matching_test --gtest_output=xml:matching_results.xml
+        echo "=== Orderbook Cancel Tests ==="
+        ./orderbook_cancel_test --gtest_output=xml:cancel_results.xml
+        echo "=== Orderbook Edge Case Tests ==="
+        ./orderbook_edge_test --gtest_output=xml:edge_results.xml
+        echo "=== Message Serialization Tests ==="
+        ./message_test --gtest_output=xml:message_results.xml
+        echo "=== Order Unit Tests ==="
+        ./order_test --gtest_output=xml:order_results.xml

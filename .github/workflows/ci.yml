@@ -26,12 +26,17 @@ jobs:
       run: |
         mkdir -p build
         cd build
-        cmake -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} ..
+        cmake -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} -DBUILD_TESTS=ON ..
 
     - name: Build
       run: |
         cd build
         cmake --build . --config ${{ env.BUILD_TYPE }}
+
+    - name: Run Tests
+      run: |
+        cd build
+        ctest --output-on-failure -C ${{ env.BUILD_TYPE }}
 
     - name: List build artifacts
       run: |
