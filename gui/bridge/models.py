@@ -17,6 +17,8 @@ class OrderSide(str, Enum):
 class OrderType(str, Enum):
     LIMIT = "LIMIT"
     MARKET = "MARKET"
+    STOP = "STOP"
+    STOP_LIMIT = "STOP_LIMIT"
 
 
 class OrderStatus(str, Enum):
@@ -39,6 +41,7 @@ class OrderSubmit(BaseModel):
     side: OrderSide
     order_type: OrderType = OrderType.LIMIT
     price: float
+    stop_price: float = 0.0
     quantity: int
 
 
@@ -59,6 +62,7 @@ class OrderStatusMsg(BaseModel):
     side: OrderSide = OrderSide.BUY
     order_type: OrderType = OrderType.LIMIT
     price: float = 0.0
+    stop_price: float = 0.0
     quantity: int = 0
     filled_quantity: int = 0
     status: OrderStatus = OrderStatus.PENDING

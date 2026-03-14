@@ -17,6 +17,28 @@ from models import (
     PriceLevel, OrderSide, OrderType, OrderStatus,
 )
 
+# Login models (defined here to avoid circular deps)
+from pydantic import BaseModel
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class LoginResponse(BaseModel):
+    success: bool = False
+    session_token: str = ""
+    username: str = ""
+    error_message: str = ""
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+class RegisterResponse(BaseModel):
+    success: bool = False
+    username: str = ""
+    error_message: str = ""
+
 HEADER_SIZE = 4
 MAX_MESSAGE_SIZE = 1024 * 1024  # 1 MB
 
@@ -46,6 +68,8 @@ def serialize_order_submit(msg: OrderSubmit) -> str:
         f"price={msg.price:.2f}",
         f"quantity={msg.quantity}",
     ]
+    if msg.stop_price > 0:
+        lines.append(f"stop_price={msg.stop_price:.2f}")
     return "\n".join(lines)
 
 
@@ -67,6 +91,24 @@ def serialize_order_status_request(order_id: str, client_id: str) -> str:
         "type=ORDER_STATUS",
         f"order_id={order_id}",
         f"client_id={client_id}",
+    ]
+    return "\n".join(lines)
+
+
+def serialize_login(msg: LoginRequest) -> str:
+    lines = [
+        "type=LOGIN",
+        f"username={msg.username}",
+        f"password={msg.password}",
+    ]
+    return "\n".join(lines)
+
+
+def serialize_register(msg: RegisterRequest) -> str:
+    lines = [
+        "type=REGISTER",
+        f"username={msg.username}",
+        f"password={msg.password}",
     ]
     return "\n".join(lines)
 
@@ -111,6 +153,10 @@ def parse_message(data: str) -> Optional[Dict[str, Any]]:
         return _parse_trade(lines[1:])
     elif msg_type == "ERROR":
         return _parse_error(lines[1:])
+    elif msg_type == "LOGIN_RESPONSE":
+        return _parse_login_response(lines[1:])
+    elif msg_type == "REGISTER_RESPONSE":
+        return _parse_register_response(lines[1:])
     else:
         return {"type": "UNKNOWN", "raw": data}
 
@@ -138,6 +184,8 @@ def _parse_order_status(lines: list[str]) -> dict:
             result["status"] = _extract_string(line)
         elif line.startswith("order_type="):
             result["order_type"] = _extract_string(line)
+        elif line.startswith("stop_price="):
+            result["stop_price"] = _extract_float(line)
         elif line.startswith("timestamp="):
             result["timestamp"] = _extract_string(line)
     return result
@@ -203,4 +251,34 @@ def _parse_error(lines: list[str]) -> dict:
             result["error_code"] = _extract_string(line)
         elif line.startswith("description="):
             result["description"] = _extract_string(line)
+    return result
+
+
+def _parse_login_response(lines: list[str]) -> dict:
+    result: dict = {"type": "LOGIN_RESPONSE"}
+    for line in lines:
+        if not line:
+            continue
+        if line.startswith("success="):
+            result["success"] = _extract_string(line).lower() == "true"
+        elif line.startswith("session_token="):
+            result["session_token"] = _extract_string(line)
+        elif line.startswith("username="):
+            result["username"] = _extract_string(line)
+        elif line.startswith("error_message="):
+            result["error_message"] = _extract_string(line)
+    return result
+
+
+def _parse_register_response(lines: list[str]) -> dict:
+    result: dict = {"type": "REGISTER_RESPONSE"}
+    for line in lines:
+        if not line:
+            continue
+        if line.startswith("success="):
+            result["success"] = _extract_string(line).lower() == "true"
+        elif line.startswith("username="):
+            result["username"] = _extract_string(line)
+        elif line.startswith("error_message="):
+            result["error_message"] = _extract_string(line)
     return result

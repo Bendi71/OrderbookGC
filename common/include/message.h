@@ -50,7 +50,11 @@ enum class MessageType {
     ORDERBOOK_SNAPSHOT,
     TRADE_NOTIFICATION,
     ERROR_MSG,
-    SNAPSHOT_REQUEST 
+    SNAPSHOT_REQUEST,
+    LOGIN,
+    LOGIN_RESPONSE,
+    REGISTER,
+    REGISTER_RESPONSE
 };
 
 // Convert MessageType to string
@@ -63,6 +67,10 @@ inline std::string messageTypeToString(MessageType type) {
         case MessageType::TRADE_NOTIFICATION: return "TRADE_NOTIFICATION";
         case MessageType::ERROR_MSG: return "ERROR";
         case MessageType::SNAPSHOT_REQUEST: return "SNAPSHOT_REQUEST";
+        case MessageType::LOGIN: return "LOGIN";
+        case MessageType::LOGIN_RESPONSE: return "LOGIN_RESPONSE";
+        case MessageType::REGISTER: return "REGISTER";
+        case MessageType::REGISTER_RESPONSE: return "REGISTER_RESPONSE";
         default: return "UNKNOWN";
     }
 }
@@ -76,6 +84,10 @@ inline MessageType messageTypeFromString(const std::string& typeStr) {
     if (typeStr == "TRADE_NOTIFICATION") return MessageType::TRADE_NOTIFICATION;
     if (typeStr == "ERROR") return MessageType::ERROR_MSG;
     if (typeStr == "SNAPSHOT_REQUEST") return MessageType::SNAPSHOT_REQUEST;
+    if (typeStr == "LOGIN") return MessageType::LOGIN;
+    if (typeStr == "LOGIN_RESPONSE") return MessageType::LOGIN_RESPONSE;
+    if (typeStr == "REGISTER") return MessageType::REGISTER;
+    if (typeStr == "REGISTER_RESPONSE") return MessageType::REGISTER_RESPONSE;
     throw std::runtime_error("Unknown message type: " + typeStr);
 }
 
@@ -149,6 +161,7 @@ public:
     OrderSide side;
     OrderType order_type = OrderType::LIMIT;
     double price;
+    double stop_price = 0.0;
     uint32_t quantity;
 };
 
@@ -180,6 +193,7 @@ public:
     OrderSide side;
     OrderType order_type = OrderType::LIMIT;
     double price;
+    double stop_price = 0.0;
     uint32_t quantity;
     uint32_t filled_quantity;
     OrderStatus status;
@@ -237,6 +251,61 @@ public:
     std::string serialize() const override;
     
     std::string symbol;
+};
+
+// Login message — client sends credentials to authenticate
+class LoginMessage : public Message {
+public:
+    LoginMessage() = default;
+    LoginMessage(const std::string& username, const std::string& password)
+        : username(username), password(password) {}
+    
+    MessageType getType() const override { return MessageType::LOGIN; }
+    std::string serialize() const override;
+    
+    std::string username;
+    std::string password;
+};
+
+// Login response — server replies with success/failure + token
+class LoginResponseMessage : public Message {
+public:
+    LoginResponseMessage() = default;
+    
+    MessageType getType() const override { return MessageType::LOGIN_RESPONSE; }
+    std::string serialize() const override;
+    
+    bool success = false;
+    std::string session_token;
+    std::string username;
+    std::string error_message;
+};
+
+// Register message — client sends desired username/password to create an account
+class RegisterMessage : public Message {
+public:
+    RegisterMessage() = default;
+    RegisterMessage(const std::string& username, const std::string& password)
+        : username(username), password(password) {}
+    
+    MessageType getType() const override { return MessageType::REGISTER; }
+    std::string serialize() const override;
+    
+    std::string username;
+    std::string password;
+};
+
+// Register response — server replies with success/failure
+class RegisterResponseMessage : public Message {
+public:
+    RegisterResponseMessage() = default;
+    
+    MessageType getType() const override { return MessageType::REGISTER_RESPONSE; }
+    std::string serialize() const override;
+    
+    bool success = false;
+    std::string username;
+    std::string error_message;
 };
 
 }

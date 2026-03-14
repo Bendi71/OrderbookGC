@@ -1,13 +1,15 @@
 /**
- * Historical price candlestick chart.
+ * Historical price chart with toggle between candlestick and line views.
  * Aggregates trade prices into OHLC candles and renders them
- * using Recharts with a custom candlestick shape (body + wicks).
+ * using Recharts with a custom candlestick shape (body + wicks)
+ * or a simple line chart of close prices.
  */
 
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ComposedChart,
   Bar,
+  Line,
   XAxis,
   YAxis,
   Tooltip,
@@ -195,8 +197,11 @@ const CandleTooltip: React.FC<{ active?: boolean; payload?: any[] }> = ({
 
 /* ─── main component ───────────────────────────────────────── */
 
+type ChartMode = 'candle' | 'line';
+
 const PriceChart: React.FC = () => {
   const priceHistory = useOrderbookStore((s) => s.priceHistory);
+  const [mode, setMode] = useState<ChartMode>('candle');
 
   const candles = useMemo(() => buildCandles(priceHistory), [priceHistory]);
 
@@ -219,12 +224,36 @@ const PriceChart: React.FC = () => {
 
   return (
     <div className="bg-gray-800 rounded-lg p-4">
-      <h2 className="text-xs font-semibold text-gray-400 mb-2 uppercase tracking-wide">
-        Price Chart{' '}
-        <span className="text-gray-600 font-normal">
-          ({CANDLE_INTERVAL_MS / 1000}s candles)
-        </span>
-      </h2>
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
+          Price Chart{' '}
+          <span className="text-gray-600 font-normal">
+            ({CANDLE_INTERVAL_MS / 1000}s candles)
+          </span>
+        </h2>
+        <div className="flex gap-1">
+          <button
+            onClick={() => setMode('candle')}
+            className={`px-2 py-0.5 text-[10px] rounded ${
+              mode === 'candle'
+                ? 'bg-indigo-600 text-white'
+                : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+            }`}
+          >
+            Candle
+          </button>
+          <button
+            onClick={() => setMode('line')}
+            className={`px-2 py-0.5 text-[10px] rounded ${
+              mode === 'line'
+                ? 'bg-indigo-600 text-white'
+                : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+            }`}
+          >
+            Line
+          </button>
+        </div>
+      </div>
 
       <ResponsiveContainer width="100%" height={280}>
         <ComposedChart
@@ -248,14 +277,26 @@ const PriceChart: React.FC = () => {
             tickFormatter={(v: number) => v.toFixed(2)}
           />
           <Tooltip content={<CandleTooltip />} />
-          <Bar dataKey="range" shape={CandlestickShape} barSize={10}>
-            {candles.map((c, i) => (
-              <Cell
-                key={i}
-                fill={c.close >= c.open ? '#10b981' : '#ef4444'}
-              />
-            ))}
-          </Bar>
+
+          {mode === 'candle' ? (
+            <Bar dataKey="range" shape={CandlestickShape} barSize={10}>
+              {candles.map((c, i) => (
+                <Cell
+                  key={i}
+                  fill={c.close >= c.open ? '#10b981' : '#ef4444'}
+                />
+              ))}
+            </Bar>
+          ) : (
+            <Line
+              type="monotone"
+              dataKey="close"
+              stroke="#6366f1"
+              strokeWidth={1.5}
+              dot={false}
+              isAnimationActive={false}
+            />
+          )}
         </ComposedChart>
       </ResponsiveContainer>
     </div>

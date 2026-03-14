@@ -12,7 +12,7 @@ interface Props {
 const statusColor: Record<string, string> = {
   PENDING: 'text-yellow-400',
   ACCEPTED: 'text-blue-400',
-  PARTIAL_FILL: 'text-cyan-400',
+  PARTIAL: 'text-cyan-400',
   FILLED: 'text-emerald-400',
   CANCELED: 'text-gray-500',
 };
@@ -53,6 +53,7 @@ const OrderList: React.FC<Props> = ({ send }) => {
                 <th className="px-2 py-1 text-left">Type</th>
                 <th className="px-2 py-1 text-left">Side</th>
                 <th className="px-2 py-1 text-right">Price</th>
+                <th className="px-2 py-1 text-right">Stop</th>
                 <th className="px-2 py-1 text-right">Qty</th>
                 <th className="px-2 py-1 text-right">Filled</th>
                 <th className="px-2 py-1 text-left">Status</th>
@@ -66,9 +67,12 @@ const OrderList: React.FC<Props> = ({ send }) => {
                     {o.order_id.slice(0, 8)}
                   </td>
                   <td className={`px-2 py-1 text-[10px] font-semibold ${
-                    o.order_type === 'MARKET' ? 'text-amber-400' : 'text-blue-400'
+                    o.order_type === 'MARKET' ? 'text-amber-400'
+                    : o.order_type === 'STOP' ? 'text-purple-400'
+                    : o.order_type === 'STOP_LIMIT' ? 'text-indigo-400'
+                    : 'text-blue-400'
                   }`}>
-                    {o.order_type ?? 'LMT'}
+                    {o.order_type === 'STOP_LIMIT' ? 'S-LMT' : o.order_type ?? 'LMT'}
                   </td>
                   <td
                     className={`px-2 py-1 font-semibold ${
@@ -78,7 +82,12 @@ const OrderList: React.FC<Props> = ({ send }) => {
                     {o.side}
                   </td>
                   <td className="px-2 py-1 text-right text-gray-300">
-                    {o.order_type === 'MARKET' ? 'MKT' : o.price.toFixed(2)}
+                    {o.order_type === 'MARKET' || o.order_type === 'STOP' ? 'MKT' : o.price.toFixed(2)}
+                  </td>
+                  <td className="px-2 py-1 text-right text-gray-400">
+                    {(o.order_type === 'STOP' || o.order_type === 'STOP_LIMIT') && o.stop_price > 0
+                      ? o.stop_price.toFixed(2)
+                      : '—'}
                   </td>
                   <td className="px-2 py-1 text-right text-gray-300">
                     {o.quantity}

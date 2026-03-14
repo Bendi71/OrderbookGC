@@ -26,6 +26,7 @@ export function useWebSocket() {
     addTrade,
     updateOrder,
     addNotification,
+    setAuth,
   } = useOrderbookStore();
 
   const connect = useCallback(() => {
@@ -105,12 +106,17 @@ export function useWebSocket() {
             receivedAt: Date.now(),
           };
           addTrade(t);
-          addNotification({
-            id: nextId(),
-            message: `Trade: ${t.quantity}@${t.price.toFixed(2)}`,
-            type: 'info',
-            time: Date.now(),
-          });
+          // Only show a toast if the bridge/server explicitly requests it
+          // (e.g. user-specific fills). Market-wide trade notifications are
+          // sent with `notify=false` to avoid spamming the UI.
+          if (msg.notify !== false) {
+            addNotification({
+              id: nextId(),
+              message: `Trade: ${t.quantity}@${t.price.toFixed(2)}`,
+              type: 'info',
+              time: Date.now(),
+            });
+          }
           break;
         }
 
@@ -120,8 +126,9 @@ export function useWebSocket() {
             client_id: msg.client_id as string,
             symbol: msg.symbol as string,
             side: msg.side as 'BUY' | 'SELL',
-            order_type: (msg.order_type as 'LIMIT' | 'MARKET') ?? 'LIMIT',
+            order_type: (msg.order_type as 'LIMIT' | 'MARKET' | 'STOP' | 'STOP_LIMIT') ?? 'LIMIT',
             price: msg.price as number,
+            stop_price: (msg.stop_price as number) ?? 0,
             quantity: msg.quantity as number,
             filled_quantity: msg.filled_quantity as number,
             status: msg.status as string,
@@ -133,7 +140,7 @@ export function useWebSocket() {
               ? 'filled'
               : o.status === 'CANCELED'
               ? 'canceled'
-              : o.status === 'PARTIAL_FILL'
+              : o.status === 'PARTIAL'
               ? 'partially filled'
               : 'accepted';
           addNotification({
@@ -148,8 +155,51 @@ export function useWebSocket() {
         case 'ERROR': {
           addNotification({
             id: nextId(),
-            message: `Error: ${msg.error_message ?? 'unknown'}`,
+            message: `Error: ${msg.description ?? msg.error_message ?? 'unknown'}`,
             type: 'error',
+            time: Date.now(),
+          });
+          break;
+        }
+
+        case 'PNL_UPDATE': {
+          // PnL dashboard functionality is currently disabled in UI.
+          break;
+        }
+
+        case 'LOGIN_RESPONSE': {
+          const success = msg.success === true || msg.success === 'true';
+          const username = (msg.username as string) ?? '';
+          const token = (msg.session_token as string) ?? '';
+          const error = (msg.error_message as string) ?? '';
+          setAuth(success, username, token, error);
+          addNotification({
+            id: nextId(),
+            message: success
+              ? `Logged in as ${username}`
+              : `Login failed: ${error || 'unknown'}`,
+            type: success ? 'success' : 'error',
+            time: Date.now(),
+          });
+          // After successful login, request snapshots to bootstrap the UI
+          if (success) {
+            const ws = wsRef.current;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ action: 'request_all_snapshots' }));
+            }
+          }
+          break;
+        }
+
+        case 'REGISTER_RESPONSE': {
+          const success = msg.success === true || msg.success === 'true';
+          const error = (msg.error_message as string) ?? '';
+          addNotification({
+            id: nextId(),
+            message: success
+              ? `Registered as ${msg.username}. You can now log in.`
+              : `Registration failed: ${error || 'unknown'}`,
+            type: success ? 'success' : 'error',
             time: Date.now(),
           });
           break;
@@ -159,7 +209,7 @@ export function useWebSocket() {
           break;
       }
     },
-    [setSnapshot, addTrade, updateOrder, addNotification],
+    [setSnapshot, addTrade, updateOrder, addNotification, setAuth],
   );
 
   /* send json command to bridge */
