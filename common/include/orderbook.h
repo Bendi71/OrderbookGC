@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <functional>
 #include <mutex>
+#include <set>
 
 namespace orderbook {
 
@@ -69,6 +70,14 @@ private:
     
     // Add an order to the appropriate side of the book
     void addOrderToBook(const OrderPtr& order);
+
+    // Store a stop order for later triggering
+    void addStopOrder(const OrderPtr& order);
+
+    // Check and trigger stop orders based on trade prices (called inside lock)
+    void processStopOrders(const std::set<double>& trade_prices,
+                           std::vector<Trade>& pending_trades,
+                           std::vector<OrderPtr>& pending_order_updates);
       // Calculate price levels for a side of the book
     std::vector<PriceLevel> calculatePriceLevels(
         const std::map<double, std::vector<OrderPtr>>& orders,
@@ -80,6 +89,8 @@ private:    std::string symbol_;
     std::map<std::string, OrderPtr> orders_by_id_;
     std::map<double, std::vector<OrderPtr>> bids_;
     std::map<double, std::vector<OrderPtr>> asks_;
+    std::map<double, std::vector<OrderPtr>> stop_buy_orders_;   // stop_price → pending stop buys
+    std::map<double, std::vector<OrderPtr>> stop_sell_orders_;  // stop_price → pending stop sells
     mutable std::mutex mutex_;
     OrderCallback order_callback_;
     TradeCallback trade_callback_;

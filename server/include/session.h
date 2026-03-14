@@ -19,6 +19,8 @@ class Session : public std::enable_shared_from_this<Session> {
 public:
     // Message handler callback type
     using MessageCallback = std::function<void(const MessagePtr&, SessionPtr)>;
+    // Disconnect callback — fired once when the session detects a closed connection
+    using DisconnectCallback = std::function<void(SessionPtr)>;
     
     // Constructor
     Session(asio::ip::tcp::socket socket, MessageCallback callback);
@@ -42,6 +44,22 @@ public:
     const std::string& getClientId() const { return client_id_; }
     void setClientId(const std::string& client_id) { client_id_ = client_id; }
     
+    // Authentication accessors
+    bool isAuthenticated() const { return authenticated_; }
+    void setAuthenticated(bool auth) { authenticated_ = auth; }
+    const std::string& getUsername() const { return username_; }
+    void setUsername(const std::string& username) { username_ = username; }
+    const std::string& getSessionToken() const { return session_token_; }
+    void setSessionToken(const std::string& token) { session_token_ = token; }
+    const std::string& getPermissions() const { return permissions_; }
+    void setPermissions(const std::string& perms) { permissions_ = perms; }
+    bool hasPermission(const std::string& perm) const {
+        return permissions_.find(perm) != std::string::npos;
+    }
+
+    // Set disconnect callback
+    void setDisconnectCallback(DisconnectCallback cb) { disconnect_callback_ = std::move(cb); }
+    
 private:
     // ASIO socket
     asio::ip::tcp::socket socket_;
@@ -49,8 +67,17 @@ private:
     // Client identifier
     std::string client_id_;
     
+    // Authentication state
+    bool authenticated_ = false;
+    std::string username_;
+    std::string session_token_;
+    std::string permissions_;  // comma-separated: "trade,view,admin"
+    
     // Message callback
     MessageCallback message_callback_;
+    
+    // Disconnect callback
+    DisconnectCallback disconnect_callback_;
     
     // Read state machine
     enum class ReadState { HEADER, CONTENT };

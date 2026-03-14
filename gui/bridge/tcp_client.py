@@ -13,6 +13,8 @@ from protocol import (
     HEADER_SIZE, MAX_MESSAGE_SIZE,
     frame_message, parse_length, parse_message,
     serialize_order_submit, serialize_order_cancel, serialize_snapshot_request,
+    serialize_login, LoginRequest,
+    serialize_register, RegisterRequest,
 )
 from models import OrderSubmit, OrderCancel, SnapshotRequest
 
@@ -29,12 +31,18 @@ class TcpClient:
         on_message: Optional[Callable[[Dict[str, Any]], None]] = None,
         on_connect: Optional[Callable[[], None]] = None,
         on_disconnect: Optional[Callable[[], None]] = None,
+        username: str = "",
+        password: str = "",
     ):
         self.host = host
         self.port = port
         self.on_message = on_message
         self.on_connect = on_connect
         self.on_disconnect = on_disconnect
+        self.username = username
+        self.password = password
+        self.authenticated = False
+        self.session_token = ""
 
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
@@ -52,7 +60,9 @@ class TcpClient:
     async def start(self):
         """Connect to the server and start read/write loops."""
         self._should_run = True
-        await self._connect()
+        ok = await self._connect()
+        if not ok and self._should_run:
+            self._reconnect_task = asyncio.create_task(self._reconnect())
 
     async def stop(self):
         """Disconnect gracefully."""
@@ -73,9 +83,25 @@ class TcpClient:
         text = serialize_snapshot_request(SnapshotRequest(symbol=symbol))
         await self._send(text)
 
+    async def login(self, username: str = "", password: str = ""):
+        """Send a LOGIN message to the server."""
+        u = username or self.username
+        p = password or self.password
+        if u:
+            text = serialize_login(LoginRequest(username=u, password=p))
+            await self._send(text)
+            logger.info("Login request sent for user: %s", u)
+
+    async def register(self, username: str, password: str):
+        """Send a REGISTER message to the server."""
+        text = serialize_register(RegisterRequest(username=username, password=password))
+        await self._send(text)
+        logger.info("Register request sent for user: %s", username)
+
     # ── Internal ─────────────────────────────────────────────
 
-    async def _connect(self):
+    async def _connect(self) -> bool:
+        """Attempt a single connection. Returns True on success."""
         try:
             self._reader, self._writer = await asyncio.open_connection(
                 self.host, self.port)
@@ -85,11 +111,11 @@ class TcpClient:
                 self.on_connect()
             self._read_task = asyncio.create_task(self._read_loop())
             self._write_task = asyncio.create_task(self._write_loop())
+            return True
         except OSError as e:
             logger.error("Connection failed: %s", e)
             self._connected = False
-            if self._should_run:
-                self._reconnect_task = asyncio.create_task(self._reconnect())
+            return False
 
     async def _close(self):
         self._connected = False
@@ -116,7 +142,10 @@ class TcpClient:
         while self._should_run and not self._connected:
             logger.info("Reconnecting in %.1fs...", delay)
             await asyncio.sleep(delay)
-            await self._connect()
+            ok = await self._connect()
+            if ok:
+                delay = 1.0   # reset backoff on success
+                break
             delay = min(delay * 2, max_delay)
 
     async def _send(self, text: str):

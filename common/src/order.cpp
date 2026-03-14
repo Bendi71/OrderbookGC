@@ -8,13 +8,15 @@ Order::Order(const std::string& id,
              uint32_t quantity,
              const std::string& symbol,
              const std::string& client_id,
-             OrderType type)
+             OrderType type,
+             double stop_price)
     : id_(id)
     , client_id_(client_id)
     , symbol_(symbol)
     , side_(side)
     , order_type_(type)
     , price_(price)
+    , stop_price_(stop_price)
     , quantity_(quantity)
     , remaining_quantity_(quantity)
     , status_(OrderStatus::PENDING)
@@ -52,6 +54,17 @@ bool Order::cancel() {
     status_ = OrderStatus::CANCELED;
     
     return true;
+}
+
+bool Order::trigger() {
+    if (order_type_ == OrderType::STOP) {
+        order_type_ = OrderType::MARKET;
+        return true;
+    } else if (order_type_ == OrderType::STOP_LIMIT) {
+        order_type_ = OrderType::LIMIT;
+        return true;
+    }
+    return false;
 }
 
 bool Order::comparePriceAscending(const std::shared_ptr<Order>& a, const std::shared_ptr<Order>& b) {

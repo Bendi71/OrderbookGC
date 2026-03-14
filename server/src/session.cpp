@@ -72,6 +72,13 @@ void Session::close() {
             std::cerr << "Exception during session close: " << e.what() << std::endl;
         }
     }
+
+    // Fire disconnect callback (once — the callback should be idempotent or
+    // the server should guard against duplicate removeSession calls).
+    if (disconnect_callback_) {
+        auto cb = std::move(disconnect_callback_);  // prevent double-fire
+        cb(shared_from_this());
+    }
 }
 
 void Session::doRead() {
@@ -160,44 +167,40 @@ void Session::doRead() {
 void Session::doWriteNext() {
     auto self = shared_from_this();
     
-    // No mutex lock here — writing_ is true, so only we touch the front of the queue.
-    // Other threads may push_back (which doesn't invalidate deque element references).
+    // Copy the front buffer under the lock so async_write operates on
+    // a stable, self-contained copy.  This avoids any reliance on deque
+    // iterator/reference stability guarantees across concurrent push_back.
+    std::shared_ptr<std::vector<uint8_t>> buf;
+    {
+        std::lock_guard<std::mutex> lock(write_mutex_);
+        if (write_messages_.empty()) {
+            writing_ = false;
+            return;
+        }
+        buf = std::make_shared<std::vector<uint8_t>>(write_messages_.front());
+    }
+
     asio::async_write(
         socket_,
-        asio::buffer(write_messages_.front()),
-        [this, self](std::error_code ec, std::size_t /*bytes_transferred*/) {
+        asio::buffer(*buf),
+        [this, self, buf](std::error_code ec, std::size_t /*bytes_transferred*/) {
             if (!ec) {
-                // Lock the mutex before modifying the queue
-                std::lock_guard<std::mutex> lock(write_mutex_);
-                
-                // Remove the completed message
-                write_messages_.pop_front();
-                
-                if (write_messages_.empty()) {
-                    writing_ = false;
-                    // Don't call doWriteNext — nothing to write
-                } else {
-                    // Unlock happens when lock_guard goes out of scope;
-                    // we can safely call doWriteNext after that.
-                    // But we need to call it outside the lock, so use a flag.
-                    // Actually, since we DON'T lock in doWriteNext, we can call it here.
-                    // The lock_guard will destruct at end of this block.
+                bool more = false;
+                {
+                    std::lock_guard<std::mutex> lock(write_mutex_);
+                    write_messages_.pop_front();
+                    if (write_messages_.empty()) {
+                        writing_ = false;
+                    } else {
+                        more = true;
+                    }
+                }
+                if (more) {
+                    doWriteNext();
                 }
             }
             else {
                 close();
-                return;
-            }
-            
-            // Check outside the lock scope whether we need to continue
-            // (lock_guard is destroyed at the end of the if block above)
-            bool more = false;
-            {
-                std::lock_guard<std::mutex> lock(write_mutex_);
-                more = writing_ && !write_messages_.empty();
-            }
-            if (more) {
-                doWriteNext();
             }
         });
 }

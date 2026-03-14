@@ -98,12 +98,15 @@ namespace {
         return OrderStatus::PENDING;
     }
 
-    // Specialization for OrderType
     template<>
     OrderType extractEnum<OrderType>(const std::string& line) {
         std::string value = extractString(line);
         if (value == "MARKET") {
             return OrderType::MARKET;
+        } else if (value == "STOP") {
+            return OrderType::STOP;
+        } else if (value == "STOP_LIMIT") {
+            return OrderType::STOP_LIMIT;
         }
         return OrderType::LIMIT;
     }
@@ -136,6 +139,8 @@ MessagePtr parseMessage(const std::string& data) {
                 message->price = extractValue<double>(line);
             } else if (line.find("quantity=") == 0) {
                 message->quantity = extractValue<uint32_t>(line);
+            } else if (line.find("stop_price=") == 0) {
+                message->stop_price = extractValue<double>(line);
             }
         }
         
@@ -174,6 +179,8 @@ MessagePtr parseMessage(const std::string& data) {
                 message->status = extractEnum<OrderStatus>(line);
             } else if (line.find("order_type=") == 0) {
                 message->order_type = extractEnum<OrderType>(line);
+            } else if (line.find("stop_price=") == 0) {
+                message->stop_price = extractValue<double>(line);
             } else if (line.find("timestamp=") == 0) {
                 message->order_timestamp = stringToTimePoint(extractString(line));
             }
@@ -258,11 +265,74 @@ MessagePtr parseMessage(const std::string& data) {
             }
         }
         
+        return message;    } else if (message_type == "LOGIN") {
+        auto message = std::make_shared<LoginMessage>();
+        
+        while (std::getline(iss, line)) {
+            if (line.find("username=") == 0) {
+                message->username = extractString(line);
+            } else if (line.find("password=") == 0) {
+                message->password = extractString(line);
+            }
+        }
+        
+        return message;
+    } else if (message_type == "LOGIN_RESPONSE") {
+        auto message = std::make_shared<LoginResponseMessage>();
+        
+        while (std::getline(iss, line)) {
+            if (line.find("success=") == 0) {
+                message->success = (extractString(line) == "true");
+            } else if (line.find("session_token=") == 0) {
+                message->session_token = extractString(line);
+            } else if (line.find("username=") == 0) {
+                message->username = extractString(line);
+            } else if (line.find("error_message=") == 0) {
+                message->error_message = extractString(line);
+            }
+        }
+        
+        return message;
+    } else if (message_type == "REGISTER") {
+        auto message = std::make_shared<RegisterMessage>();
+        
+        while (std::getline(iss, line)) {
+            if (line.find("username=") == 0) {
+                message->username = extractString(line);
+            } else if (line.find("password=") == 0) {
+                message->password = extractString(line);
+            }
+        }
+        
+        return message;
+    } else if (message_type == "REGISTER_RESPONSE") {
+        auto message = std::make_shared<RegisterResponseMessage>();
+        
+        while (std::getline(iss, line)) {
+            if (line.find("success=") == 0) {
+                message->success = (extractString(line) == "true");
+            } else if (line.find("username=") == 0) {
+                message->username = extractString(line);
+            } else if (line.find("error_message=") == 0) {
+                message->error_message = extractString(line);
+            }
+        }
+        
         return message;
     }
     
     // Unknown message type
     return std::make_shared<ErrorMessage>("PARSE_ERROR", "Unknown message type: " + message_type);
+}
+
+// Helper: OrderType to wire string
+static const char* orderTypeToWireString(OrderType t) {
+    switch (t) {
+        case OrderType::MARKET: return "MARKET";
+        case OrderType::STOP: return "STOP";
+        case OrderType::STOP_LIMIT: return "STOP_LIMIT";
+        default: return "LIMIT";
+    }
 }
 
 // OrderSubmitMessage serialization
@@ -272,8 +342,11 @@ std::string OrderSubmitMessage::serialize() const {
     ss << "client_id=" << client_id << "\n";
     ss << "symbol=" << symbol << "\n";
     ss << "side=" << (side == OrderSide::BUY ? "BUY" : "SELL") << "\n";
-    ss << "order_type=" << (order_type == OrderType::MARKET ? "MARKET" : "LIMIT") << "\n";
+    ss << "order_type=" << orderTypeToWireString(order_type) << "\n";
     ss << "price=" << std::fixed << std::setprecision(2) << price << "\n";
+    if (stop_price > 0.0) {
+        ss << "stop_price=" << std::fixed << std::setprecision(2) << stop_price << "\n";
+    }
     ss << "quantity=" << quantity;
     
     return ss.str();
@@ -297,8 +370,11 @@ std::string OrderStatusMessage::serialize() const {
     ss << "client_id=" << client_id << "\n";
     ss << "symbol=" << symbol << "\n";
     ss << "side=" << (side == OrderSide::BUY ? "BUY" : "SELL") << "\n";
-    ss << "order_type=" << (order_type == OrderType::MARKET ? "MARKET" : "LIMIT") << "\n";
+    ss << "order_type=" << orderTypeToWireString(order_type) << "\n";
     ss << "price=" << std::fixed << std::setprecision(2) << price << "\n";
+    if (stop_price > 0.0) {
+        ss << "stop_price=" << std::fixed << std::setprecision(2) << stop_price << "\n";
+    }
     ss << "quantity=" << quantity << "\n";
     ss << "filled_quantity=" << filled_quantity << "\n";
     
@@ -370,6 +446,49 @@ std::string SnapshotRequestMessage::serialize() const {
     std::stringstream ss;
     ss << "type=SNAPSHOT_REQUEST\n";
     ss << "symbol=" << symbol << "\n";
+    
+    return ss.str();
+}
+
+// LoginMessage serialization
+std::string LoginMessage::serialize() const {
+    std::stringstream ss;
+    ss << "type=LOGIN\n";
+    ss << "username=" << username << "\n";
+    ss << "password=" << password;
+    
+    return ss.str();
+}
+
+// LoginResponseMessage serialization
+std::string LoginResponseMessage::serialize() const {
+    std::stringstream ss;
+    ss << "type=LOGIN_RESPONSE\n";
+    ss << "success=" << (success ? "true" : "false") << "\n";
+    ss << "session_token=" << session_token << "\n";
+    ss << "username=" << username << "\n";
+    ss << "error_message=" << error_message;
+    
+    return ss.str();
+}
+
+// RegisterMessage serialization
+std::string RegisterMessage::serialize() const {
+    std::stringstream ss;
+    ss << "type=REGISTER\n";
+    ss << "username=" << username << "\n";
+    ss << "password=" << password;
+    
+    return ss.str();
+}
+
+// RegisterResponseMessage serialization
+std::string RegisterResponseMessage::serialize() const {
+    std::stringstream ss;
+    ss << "type=REGISTER_RESPONSE\n";
+    ss << "success=" << (success ? "true" : "false") << "\n";
+    ss << "username=" << username << "\n";
+    ss << "error_message=" << error_message;
     
     return ss.str();
 }

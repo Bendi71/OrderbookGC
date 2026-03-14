@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from tcp_client import TcpClient
 from models import OrderSubmit, OrderCancel, OrderSide, OrderType
+from pnl_tracker import PnLTracker
 
 logger = logging.getLogger("bridge")
 logging.basicConfig(level=logging.INFO,
@@ -35,31 +36,81 @@ tcp_client: TcpClient | None = None
 ws_clients: Set[WebSocket] = set()
 client_id: str = f"gui_{uuid.uuid4().hex[:12]}"
 symbols: list[str] = ["AAPL"]
+pnl_tracker: PnLTracker = PnLTracker()
+# Keep implementation but disable runtime PnL paths to reduce message overhead.
+ENABLE_PNL_DASHBOARD = False
 
 # Server connection config (set from CLI args)
 server_host = "127.0.0.1"
 server_port = 8080
+server_username = ""
+server_password = ""
 
 
 # ── Callbacks from TCP client ────────────────────────────────
 
-def on_server_message(msg: Dict[str, Any]):
-    """Broadcast every message from the C++ server to all browser WS clients."""
-    text = json.dumps(msg)
+async def _safe_send(ws: WebSocket, text: str):
+    """Send text to a WebSocket, returning False if the client is stale."""
+    try:
+        await ws.send_text(text)
+        return True
+    except Exception:
+        return False
+
+
+async def _broadcast(text: str):
+    """Send *text* to every connected browser WS, pruning dead clients."""
+    clients = list(ws_clients)
+    if not clients:
+        return
+    results = await asyncio.gather(*(_safe_send(ws, text) for ws in clients))
     stale: list[WebSocket] = []
-    for ws in ws_clients:
-        try:
-            asyncio.ensure_future(ws.send_text(text))
-        except Exception:
+    for ws, ok in zip(clients, results):
+        if not ok:
             stale.append(ws)
     for ws in stale:
         ws_clients.discard(ws)
 
 
+def on_server_message(msg: Dict[str, Any]):
+    """Broadcast every message from the C++ server to all browser WS clients."""
+    # Track PnL from order fills and trades
+    msg_type = msg.get("type")
+    if ENABLE_PNL_DASHBOARD:
+        if msg_type == "ORDER_STATUS":
+            pnl_tracker.process_order_status(msg)
+        elif msg_type == "TRADE_NOTIFICATION":
+            pnl_tracker.process_trade(msg)
+
+    # Broadcast original message to browsers.
+    # TRADE_NOTIFICATION messages can be extremely frequent. We still forward
+    # them (charts need trades) but mark them as non-notify so the frontend
+    # can avoid showing pop-up toasts for every market trade.
+    if msg_type == "TRADE_NOTIFICATION":
+        forwarded = dict(msg)
+        forwarded["notify"] = False
+        text = json.dumps(forwarded)
+    else:
+        text = json.dumps(msg)
+
+    asyncio.ensure_future(_broadcast(text))
+
+    # If PnL changed, broadcast PnL update
+    if ENABLE_PNL_DASHBOARD and msg_type in ("ORDER_STATUS", "TRADE_NOTIFICATION"):
+        pnl_update = json.dumps(pnl_tracker.get_pnl_update())
+        asyncio.ensure_future(_broadcast(pnl_update))
+
+
 def on_connect():
-    """When TCP connects, request snapshots for all configured symbols."""
-    logger.info("TCP connected — requesting snapshots for %s", symbols)
-    if tcp_client:
+    """When TCP connects, login if CLI credentials are provided and request snapshots.
+
+    If no CLI username is supplied the bridge waits for the browser to send a
+    login/register command via WebSocket before requesting snapshots.
+    """
+    logger.info("TCP connected")
+    if tcp_client and server_username:
+        asyncio.ensure_future(tcp_client.login(server_username, server_password))
+        # Auto-request snapshots only when using CLI-based auth
         for sym in symbols:
             asyncio.ensure_future(tcp_client.request_snapshot(sym))
 
@@ -67,11 +118,7 @@ def on_connect():
 def on_disconnect():
     """Notify browser clients of TCP disconnect."""
     msg = json.dumps({"type": "CONNECTION_STATUS", "connected": False})
-    for ws in list(ws_clients):
-        try:
-            asyncio.ensure_future(ws.send_text(msg))
-        except Exception:
-            pass
+    asyncio.ensure_future(_broadcast(msg))
 
 
 # ── FastAPI lifespan ─────────────────────────────────────────
@@ -85,6 +132,8 @@ async def lifespan(app: FastAPI):
         on_message=on_server_message,
         on_connect=on_connect,
         on_disconnect=on_disconnect,
+        username=server_username,
+        password=server_password,
     )
     await tcp_client.start()
     yield
@@ -137,18 +186,24 @@ async def _handle_ws_command(cmd: dict):
     action = cmd.get("action")
     if action in ("submit_order", "submit") and tcp_client:
         order_type_str = cmd.get("order_type", "LIMIT").upper()
-        order_type = OrderType(order_type_str) if order_type_str in ("LIMIT", "MARKET") else OrderType.LIMIT
+        try:
+            order_type = OrderType(order_type_str)
+        except ValueError:
+            order_type = OrderType.LIMIT
         msg = OrderSubmit(
             client_id=client_id,
             symbol=cmd.get("symbol", "AAPL"),
             side=OrderSide(cmd.get("side", "BUY")),
             order_type=order_type,
             price=float(cmd.get("price", 0)),
+            stop_price=float(cmd.get("stop_price", 0)),
             quantity=int(cmd.get("quantity", 0)),
         )
-        logger.info("Submitting %s order: %s %s %s @ %.2f x %d",
+        logger.info("Submitting %s order: %s %s %s @ %.2f x %d (stop=%.2f)",
                      msg.order_type.value, msg.client_id, msg.side.value,
-                     msg.symbol, msg.price, msg.quantity)
+                     msg.symbol, msg.price, msg.quantity, msg.stop_price)
+        if ENABLE_PNL_DASHBOARD:
+            pnl_tracker.register_order(msg)
         await tcp_client.submit_order(msg)
     elif action in ("cancel_order", "cancel") and tcp_client:
         msg = OrderCancel(
@@ -159,6 +214,20 @@ async def _handle_ws_command(cmd: dict):
         await tcp_client.cancel_order(msg)
     elif action in ("request_snapshot", "snapshot") and tcp_client:
         await tcp_client.request_snapshot(cmd.get("symbol", "AAPL"))
+    elif action == "login" and tcp_client:
+        username = cmd.get("username", "")
+        password = cmd.get("password", "")
+        logger.info("GUI login request for user: %s", username)
+        await tcp_client.login(username, password)
+    elif action == "register" and tcp_client:
+        username = cmd.get("username", "")
+        password = cmd.get("password", "")
+        logger.info("GUI register request for user: %s", username)
+        await tcp_client.register(username, password)
+    elif action == "request_all_snapshots" and tcp_client:
+        # Frontend sends this after successful login to bootstrap data
+        for sym in symbols:
+            await tcp_client.request_snapshot(sym)
     else:
         logger.warning("Unknown WS command action: %s", action)
 
@@ -170,6 +239,7 @@ class OrderRequest(BaseModel):
     side: str = "BUY"
     order_type: str = "LIMIT"
     price: float = 0.0
+    stop_price: float = 0.0
     quantity: int
 
 
@@ -181,10 +251,13 @@ async def submit_order(req: OrderRequest):
         client_id=client_id,
         symbol=req.symbol,
         side=OrderSide(req.side),
-        order_type=OrderType(req.order_type.upper()) if req.order_type.upper() in ("LIMIT", "MARKET") else OrderType.LIMIT,
+        order_type=OrderType(req.order_type.upper()) if req.order_type.upper() in ("LIMIT", "MARKET", "STOP", "STOP_LIMIT") else OrderType.LIMIT,
         price=req.price,
+        stop_price=req.stop_price,
         quantity=req.quantity,
     )
+    if ENABLE_PNL_DASHBOARD:
+        pnl_tracker.register_order(msg)
     await tcp_client.submit_order(msg)
     return {"status": "submitted", "client_id": client_id}
 
@@ -208,10 +281,35 @@ async def get_status():
     }
 
 
+# ── PnL endpoints ────────────────────────────────────────────
+
+@app.get("/api/pnl")
+async def get_pnl():
+    """Get current PnL state."""
+    if not ENABLE_PNL_DASHBOARD:
+        return {"enabled": False, "message": "PnL dashboard is disabled"}
+    return pnl_tracker.get_pnl_update()
+
+
+@app.post("/api/pnl/capital")
+async def set_capital(body: dict):
+    """Set initial capital. Body: {"amount": 100000.0}"""
+    if not ENABLE_PNL_DASHBOARD:
+        return {"error": "PnL dashboard is disabled"}
+    amount = float(body.get("amount", 0))
+    if amount <= 0:
+        return {"error": "Amount must be positive"}
+    pnl_tracker.set_initial_capital(amount)
+    # Broadcast PnL update
+    pnl_update = json.dumps(pnl_tracker.get_pnl_update())
+    await _broadcast(pnl_update)
+    return {"status": "ok", "initial_capital": amount}
+
+
 # ── CLI ──────────────────────────────────────────────────────
 
 def main():
-    global server_host, server_port, symbols
+    global server_host, server_port, symbols, server_username, server_password
 
     parser = argparse.ArgumentParser(description="OrderbookGC Python Bridge")
     parser.add_argument("--server-host", default="127.0.0.1")
@@ -219,11 +317,23 @@ def main():
     parser.add_argument("--listen-port", type=int, default=3001)
     parser.add_argument("--symbols", default="AAPL",
                         help="Comma-separated symbols to subscribe to")
+    parser.add_argument("--username", default="",
+                        help="Username for server authentication")
+    parser.add_argument("--password", default="",
+                        help="Password for server authentication")
+    parser.add_argument("--initial-capital", type=float, default=100000.0,
+                        help="Initial capital for PnL tracking")
     args = parser.parse_args()
 
     server_host = args.server_host
     server_port = args.server_port
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    server_username = args.username
+    server_password = args.password
+    if ENABLE_PNL_DASHBOARD:
+        pnl_tracker.set_initial_capital(args.initial_capital)
+    else:
+        logger.info("PnL dashboard runtime is disabled")
 
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=args.listen_port, log_level="info")

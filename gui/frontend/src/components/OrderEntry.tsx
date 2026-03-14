@@ -11,9 +11,10 @@ interface Props {
 
 const OrderEntry: React.FC<Props> = ({ send, symbols = ['AAPL'] }) => {
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY');
-  const [orderType, setOrderType] = useState<'LIMIT' | 'MARKET'>('LIMIT');
+  const [orderType, setOrderType] = useState<'LIMIT' | 'MARKET' | 'STOP' | 'STOP_LIMIT'>('LIMIT');
   const [symbol, setSymbol] = useState(symbols[0] ?? 'AAPL');
   const [price, setPrice] = useState('');
+  const [stopPrice, setStopPrice] = useState('');
   const [quantity, setQuantity] = useState('');
 
   const submit = useCallback(
@@ -22,35 +23,41 @@ const OrderEntry: React.FC<Props> = ({ send, symbols = ['AAPL'] }) => {
       const q = parseInt(quantity, 10);
       if (!q || q <= 0) return;
 
-      if (orderType === 'LIMIT') {
+      const payload: Record<string, unknown> = {
+        action: 'submit_order',
+        symbol,
+        side,
+        order_type: orderType,
+        quantity: q,
+      };
+
+      // Price required for LIMIT and STOP_LIMIT
+      if (orderType === 'LIMIT' || orderType === 'STOP_LIMIT') {
         const p = parseFloat(price);
         if (!p || p <= 0) return;
-        send({
-          action: 'submit_order',
-          symbol,
-          side,
-          order_type: 'LIMIT',
-          price: p,
-          quantity: q,
-        });
+        payload.price = p;
       } else {
-        send({
-          action: 'submit_order',
-          symbol,
-          side,
-          order_type: 'MARKET',
-          price: 0,
-          quantity: q,
-        });
+        payload.price = 0;
       }
+
+      // Stop price required for STOP and STOP_LIMIT
+      if (orderType === 'STOP' || orderType === 'STOP_LIMIT') {
+        const sp = parseFloat(stopPrice);
+        if (!sp || sp <= 0) return;
+        payload.stop_price = sp;
+      }
+
+      send(payload);
       setPrice('');
+      setStopPrice('');
       setQuantity('');
     },
-    [send, symbol, side, orderType, price, quantity],
+    [send, symbol, side, orderType, price, stopPrice, quantity],
   );
 
   const isBuy = side === 'BUY';
-  const isMarket = orderType === 'MARKET';
+  const needsPrice = orderType === 'LIMIT' || orderType === 'STOP_LIMIT';
+  const needsStopPrice = orderType === 'STOP' || orderType === 'STOP_LIMIT';
 
   return (
     <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
@@ -86,29 +93,27 @@ const OrderEntry: React.FC<Props> = ({ send, symbols = ['AAPL'] }) => {
         </div>
 
         {/* Order Type toggle */}
-        <div className="grid grid-cols-2 gap-1 bg-gray-900 rounded p-0.5">
-          <button
-            type="button"
-            onClick={() => setOrderType('LIMIT')}
-            className={`text-xs font-bold py-1.5 rounded transition-colors ${
-              !isMarket
-                ? 'bg-blue-600 text-white'
-                : 'text-gray-400 hover:text-gray-200'
-            }`}
-          >
-            LIMIT
-          </button>
-          <button
-            type="button"
-            onClick={() => setOrderType('MARKET')}
-            className={`text-xs font-bold py-1.5 rounded transition-colors ${
-              isMarket
-                ? 'bg-amber-600 text-white'
-                : 'text-gray-400 hover:text-gray-200'
-            }`}
-          >
-            MARKET
-          </button>
+        <div className="grid grid-cols-4 gap-1 bg-gray-900 rounded p-0.5">
+          {(['LIMIT', 'MARKET', 'STOP', 'STOP_LIMIT'] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setOrderType(t)}
+              className={`text-[10px] font-bold py-1.5 rounded transition-colors ${
+                orderType === t
+                  ? t === 'LIMIT'
+                    ? 'bg-blue-600 text-white'
+                    : t === 'MARKET'
+                    ? 'bg-amber-600 text-white'
+                    : t === 'STOP'
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-indigo-600 text-white'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              {t === 'STOP_LIMIT' ? 'S-LMT' : t}
+            </button>
+          ))}
         </div>
 
         {/* Symbol */}
@@ -127,8 +132,8 @@ const OrderEntry: React.FC<Props> = ({ send, symbols = ['AAPL'] }) => {
           </select>
         </div>
 
-        {/* Price (limit only) */}
-        {!isMarket && (
+        {/* Price (limit and stop-limit only) */}
+        {needsPrice && (
         <div>
           <label className="text-[10px] text-gray-500 uppercase">Price</label>
           <input
@@ -139,6 +144,22 @@ const OrderEntry: React.FC<Props> = ({ send, symbols = ['AAPL'] }) => {
             onChange={(e) => setPrice(e.target.value)}
             placeholder="0.00"
             className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+        </div>
+        )}
+
+        {/* Stop Price (stop and stop-limit only) */}
+        {needsStopPrice && (
+        <div>
+          <label className="text-[10px] text-gray-500 uppercase">Stop Price</label>
+          <input
+            type="number"
+            step="0.01"
+            min="0.01"
+            value={stopPrice}
+            onChange={(e) => setStopPrice(e.target.value)}
+            placeholder="0.00"
+            className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-purple-500"
           />
         </div>
         )}
@@ -168,8 +189,14 @@ const OrderEntry: React.FC<Props> = ({ send, symbols = ['AAPL'] }) => {
           }`}
         >
           {isBuy
-            ? isMarket ? 'Market Buy' : 'Place Buy Order'
-            : isMarket ? 'Market Sell' : 'Place Sell Order'}
+            ? orderType === 'MARKET' ? 'Market Buy'
+              : orderType === 'STOP' ? 'Stop Buy'
+              : orderType === 'STOP_LIMIT' ? 'Stop-Limit Buy'
+              : 'Place Buy Order'
+            : orderType === 'MARKET' ? 'Market Sell'
+              : orderType === 'STOP' ? 'Stop Sell'
+              : orderType === 'STOP_LIMIT' ? 'Stop-Limit Sell'
+              : 'Place Sell Order'}
         </button>
       </form>
     </div>

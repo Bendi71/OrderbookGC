@@ -1,6 +1,7 @@
 #pragma once
 
 #include "orderbook.h"
+#include "order_store.h"
 #include "session.h"
 #include "order_generator.h"
 #include <asio.hpp>
@@ -48,6 +49,26 @@ public:
     // Set the snapshot interval
     void setSnapshotInterval(int interval_ms) { snapshot_interval_ms_ = interval_ms; }
     
+    // Enable/disable authentication requirement
+    void setAuthRequired(bool required) { auth_required_ = required; }
+    bool isAuthRequired() const { return auth_required_; }
+    
+    // Set the database path for persistence
+    void setDatabasePath(const std::string& path) { db_path_ = path; }
+    
+    // Initialize persistence (call after setDatabasePath, before start)
+    bool initPersistence();
+    
+    // Get the order store (for external access if needed)
+    OrderStore* getOrderStore() { return order_store_.get(); }
+
+    // Callback for trade notifications — public so main.cpp can access if needed
+    void onTradeExecuted(const Trade& trade);
+
+    // Benchmark counters
+    uint64_t getTradeCount() const { return trade_count_.load(std::memory_order_relaxed); }
+    uint64_t getOrderCount() const { return order_count_.load(std::memory_order_relaxed); }
+    
 private:
     // Accept a new connection
     void acceptConnection();
@@ -65,14 +86,20 @@ private:
     // Handle order status request
     void handleOrderStatus(const std::shared_ptr<OrderStatusMessage>& message, SessionPtr session);
     
+    // Handle login request
+    void handleLogin(const std::shared_ptr<LoginMessage>& message, SessionPtr session);
+    
+    // Handle registration request
+    void handleRegister(const std::shared_ptr<RegisterMessage>& message, SessionPtr session);
+    
+    // Check if session has required permission; sends error and returns false if not
+    bool requireAuth(SessionPtr session, const std::string& permission = "trade");
+    
     // Remove a disconnected session and clean up its resources
     void removeSession(const SessionPtr& session);
     
     // Callback for order updates
     void onOrderUpdated(const OrderPtr& order);
-    
-    // Callback for trade notifications
-    void onTradeExecuted(const Trade& trade);
     
     // Send a snapshot of the orderbook to all subscribed clients
     void sendOrderbookSnapshots();
@@ -104,6 +131,17 @@ private:
 
     // Order generator for automated trading simulation
     std::shared_ptr<OrderGenerator> order_generator_;
+
+    // Benchmark counters (atomic for cross-thread access)
+    std::atomic<uint64_t> trade_count_{0};
+    std::atomic<uint64_t> order_count_{0};
+    
+    // Authentication configuration
+    bool auth_required_ = false;  // When false, all sessions are auto-authenticated
+    
+    // Persistence
+    std::string db_path_ = "orderbook.db";
+    std::unique_ptr<OrderStore> order_store_;
 };
 
 }

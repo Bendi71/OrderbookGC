@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <set>
 
 namespace orderbook {
 
@@ -63,24 +64,38 @@ bool OrderBook::addOrder(const OrderPtr& order) {
         // Add the order to the map for quick lookup
         orders_by_id_[order->getId()] = order;
         
-        // Try to match the order with existing orders, collecting events
-        matchOrder(order, pending_trades, pending_order_updates);
-        
-        // If the order is not fully filled, add it to the book (limit only)
-        // Market orders never rest — cancel any unfilled remainder
-        if (order->getRemainingQuantity() > 0 && 
-            order->getStatus() != OrderStatus::FILLED &&
-            order->getStatus() != OrderStatus::CANCELED) {
-            if (order->getOrderType() == OrderType::MARKET) {
-                // Market order with unfilled qty → cancel the remainder
-                order->cancel();
-                orders_by_id_.erase(order->getId());
-            } else {
-                addOrderToBook(order);
-            }
+        // Stop orders are stored separately, not matched immediately
+        if (order->isStopOrder()) {
+            addStopOrder(order);
         } else {
-            // If the order is fully filled or canceled, remove it from the map
-            orders_by_id_.erase(order->getId());
+            // Try to match the order with existing orders, collecting events
+            matchOrder(order, pending_trades, pending_order_updates);
+            
+            // If the order is not fully filled, add it to the book (limit only)
+            // Market orders never rest — cancel any unfilled remainder
+            if (order->getRemainingQuantity() > 0 && 
+                order->getStatus() != OrderStatus::FILLED &&
+                order->getStatus() != OrderStatus::CANCELED) {
+                if (order->getOrderType() == OrderType::MARKET) {
+                    // Market order with unfilled qty → cancel the remainder
+                    order->cancel();
+                    orders_by_id_.erase(order->getId());
+                } else {
+                    addOrderToBook(order);
+                }
+            } else {
+                // If the order is fully filled or canceled, remove it from the map
+                orders_by_id_.erase(order->getId());
+            }
+            
+            // Check if any trades triggered stop orders
+            if (!pending_trades.empty()) {
+                std::set<double> trade_prices;
+                for (const auto& t : pending_trades) {
+                    trade_prices.insert(t.price);
+                }
+                processStopOrders(trade_prices, pending_trades, pending_order_updates);
+            }
         }
     }
     
@@ -91,6 +106,9 @@ bool OrderBook::addOrder(const OrderPtr& order) {
         }
     }
     for (const auto& updated_order : pending_order_updates) {
+        // Skip the incoming order — it gets its own callback below with
+        // its final state, avoiding duplicate notifications.
+        if (updated_order == order) continue;
         if (order_callback_) {
             order_callback_(updated_order);
         }
@@ -123,26 +141,42 @@ bool OrderBook::cancelOrder(const std::string& order_id) {
         // Remove from orders_by_id_ to prevent memory leak
         orders_by_id_.erase(it);
         
-        // Remove the order from the appropriate side of the book
-        if (order->getSide() == OrderSide::BUY) {
+        // Check if it's an untriggered stop order
+        if (order->isStopOrder()) {
+            auto& stop_map = (order->getSide() == OrderSide::BUY) 
+                ? stop_buy_orders_ : stop_sell_orders_;
+            auto price_it = stop_map.find(order->getStopPrice());
+            if (price_it != stop_map.end()) {
+                auto& orders_at_price = price_it->second;
+                auto order_it = std::find(orders_at_price.begin(), orders_at_price.end(), order);
+                if (order_it != orders_at_price.end()) {
+                    orders_at_price.erase(order_it);
+                    if (orders_at_price.empty()) {
+                        stop_map.erase(price_it);
+                    }
+                }
+            }
+        } else if (order->getSide() == OrderSide::BUY) {
+            // Remove from regular bid book
             auto price_it = bids_.find(order->getPrice());
             if (price_it != bids_.end()) {
                 auto& orders_at_price = price_it->second;
                 auto order_it = std::find(orders_at_price.begin(), orders_at_price.end(), order);
                 if (order_it != orders_at_price.end()) {
-                    orders_at_price.erase(order_it);  // Use erase to preserve FIFO ordering
+                    orders_at_price.erase(order_it);
                     if (orders_at_price.empty()) {
                         bids_.erase(price_it);
                     }
                 }
             }
         } else {
+            // Remove from regular ask book
             auto price_it = asks_.find(order->getPrice());
             if (price_it != asks_.end()) {
                 auto& orders_at_price = price_it->second;
                 auto order_it = std::find(orders_at_price.begin(), orders_at_price.end(), order);
                 if (order_it != orders_at_price.end()) {
-                    orders_at_price.erase(order_it);  // Use erase to preserve FIFO ordering
+                    orders_at_price.erase(order_it);
                     if (orders_at_price.empty()) {
                         asks_.erase(price_it);
                     }
@@ -403,6 +437,76 @@ std::vector<PriceLevel> OrderBook::calculatePriceLevels(
     }
     
     return levels;
+}
+
+void OrderBook::addStopOrder(const OrderPtr& order) {
+    double sp = order->getStopPrice();
+    if (order->getSide() == OrderSide::BUY) {
+        stop_buy_orders_[sp].push_back(order);
+    } else {
+        stop_sell_orders_[sp].push_back(order);
+    }
+}
+
+void OrderBook::processStopOrders(const std::set<double>& trade_prices,
+                                   std::vector<Trade>& pending_trades,
+                                   std::vector<OrderPtr>& pending_order_updates) {
+    std::vector<OrderPtr> triggered;
+
+    for (double price : trade_prices) {
+        // Stop BUY triggers when market price >= stop_price
+        auto it = stop_buy_orders_.begin();
+        while (it != stop_buy_orders_.end() && it->first <= price) {
+            for (auto& order : it->second) {
+                order->trigger();
+                triggered.push_back(order);
+            }
+            it = stop_buy_orders_.erase(it);
+        }
+
+        // Stop SELL triggers when market price <= stop_price
+        while (!stop_sell_orders_.empty()) {
+            auto rit = stop_sell_orders_.rbegin();
+            if (rit->first < price) break;
+            for (auto& order : rit->second) {
+                order->trigger();
+                triggered.push_back(order);
+            }
+            stop_sell_orders_.erase(std::prev(stop_sell_orders_.end()));
+        }
+    }
+
+    if (triggered.empty()) return;
+
+    size_t prev_trade_count = pending_trades.size();
+
+    for (auto& order : triggered) {
+        matchOrder(order, pending_trades, pending_order_updates);
+
+        if (order->getRemainingQuantity() > 0 &&
+            order->getStatus() != OrderStatus::FILLED &&
+            order->getStatus() != OrderStatus::CANCELED) {
+            if (order->getOrderType() == OrderType::MARKET) {
+                order->cancel();
+                orders_by_id_.erase(order->getId());
+            } else {
+                addOrderToBook(order);
+            }
+        } else {
+            orders_by_id_.erase(order->getId());
+        }
+    }
+
+    // Cascading: new trades from triggered orders may trigger more stops
+    if (pending_trades.size() > prev_trade_count) {
+        std::set<double> new_prices;
+        for (size_t i = prev_trade_count; i < pending_trades.size(); i++) {
+            new_prices.insert(pending_trades[i].price);
+        }
+        if (!new_prices.empty()) {
+            processStopOrders(new_prices, pending_trades, pending_order_updates);
+        }
+    }
 }
 
 }

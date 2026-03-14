@@ -13,6 +13,11 @@ Server::Server(asio::io_context& io_context, unsigned short port)
 void Server::start() {
     std::cout << "Server starting on port " << acceptor_.local_endpoint().port() << std::endl;
     
+    // Initialize persistence if not already done
+    if (!order_store_) {
+        initPersistence();
+    }
+    
     // Start accepting connections
     acceptConnection();
     
@@ -45,22 +50,75 @@ void Server::stop() {
     }
 }
 
+bool Server::initPersistence() {
+    order_store_ = std::make_unique<OrderStore>(db_path_);
+    if (!order_store_->open()) {
+        std::cerr << "Failed to open order store at: " << db_path_ << std::endl;
+        order_store_.reset();
+        return false;
+    }
+    
+    // Seed default users for auth
+    order_store_->seedDefaultUsers();
+    
+    std::cout << "Persistence initialized: " << db_path_ << std::endl;
+    
+    // Restore active orders from DB into orderbooks
+    auto active_orders = order_store_->loadAllActiveOrders();
+    if (!active_orders.empty()) {
+        std::cout << "Restoring " << active_orders.size() << " active orders from DB..." << std::endl;
+        for (const auto& order : active_orders) {
+            auto orderbook = getOrderbook(order->getSymbol());
+            if (orderbook) {
+                orderbook->addOrder(order);
+            }
+        }
+        std::cout << "Order restoration complete." << std::endl;
+    }
+    
+    return true;
+}
+
 void Server::configureOrderGenerator(const OrderGenerator::Config& config) {
     if (order_generator_) {
         // Stop the generator first if it's running
         order_generator_->stop();
         // Apply the new configuration
         order_generator_->setConfig(config);
-        // The generator will be started in the start() method
     } else {
         // Create a new generator with the specified config
         order_generator_ = std::make_shared<OrderGenerator>(config);
     }
+
+    // Set up the order callback — post addOrder to io_context so all matching
+    // and callbacks run on the ASIO thread (thread-safe for session writes).
+    order_generator_->setOrderCallback([this](const OrderPtr& order) {
+        asio::post(io_context_, [this, order]() {
+            auto orderbook = getOrderbook(order->getSymbol());
+            if (orderbook) {
+                orderbook->addOrder(order);
+                order_count_.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    });
+
+    // Cancel callback — orderbook is internally mutex-protected and generator
+    // orders have no session owner, so onOrderUpdated() returns early.
+    auto gen_symbol = config.symbol;
+    order_generator_->setCancelCallback([this, gen_symbol](const std::string& order_id) -> bool {
+        auto orderbook = getOrderbook(gen_symbol);
+        if (orderbook) {
+            return orderbook->cancelOrder(order_id);
+        }
+        return false;
+    });
+
+    // The generator will be started in the start() method
 }
 
 bool Server::createOrderbook(const std::string& symbol) {
     // Default tick size if not specified
-    return createOrderbook(symbol, 0.01);
+    return createOrderbook(symbol, 0.1);
 }
 
 bool Server::createOrderbook(const std::string& symbol, double tick_size) {
@@ -195,6 +253,12 @@ void Server::acceptConnection() {
                 std::string client_id = orderbook::generateUuid();
                 session->setClientId(client_id);
                 
+                // Set disconnect callback so the session is cleaned up on close
+                session->setDisconnectCallback([this](SessionPtr s) {
+                    std::cout << "Session disconnected: " << s->getClientId() << std::endl;
+                    removeSession(s);
+                });
+                
                 // Add the session to the map of active sessions
                 {
                     std::lock_guard<std::mutex> lock(sessions_mutex_);
@@ -222,17 +286,36 @@ void Server::handleMessage(const MessagePtr& message, SessionPtr session) {
         return;
     }
     
-    // Handle different message types
+    // Login messages are always allowed (even before auth)
+    if (auto login = std::dynamic_pointer_cast<LoginMessage>(message)) {
+        handleLogin(login, session);
+        return;
+    }
+    
+    // Register messages are always allowed (even before auth)
+    if (auto reg = std::dynamic_pointer_cast<RegisterMessage>(message)) {
+        handleRegister(reg, session);
+        return;
+    }
+    
+    // Snapshot requests only need "view" permission
+    if (auto snapshot_request = std::dynamic_pointer_cast<SnapshotRequestMessage>(message)) {
+        if (!requireAuth(session, "view")) return;
+        handleSnapshotRequest(snapshot_request, session);
+        return;
+    }
+    
+    // Handle different message types (require "trade" permission)
     if (auto order_submit = std::dynamic_pointer_cast<OrderSubmitMessage>(message)) {
+        if (!requireAuth(session, "trade")) return;
         handleOrderSubmit(order_submit, session);
     }
     else if (auto order_cancel = std::dynamic_pointer_cast<OrderCancelMessage>(message)) {
+        if (!requireAuth(session, "trade")) return;
         handleOrderCancel(order_cancel, session);
     }
-    else if (auto snapshot_request = std::dynamic_pointer_cast<SnapshotRequestMessage>(message)) {
-        handleSnapshotRequest(snapshot_request, session);
-    }
     else if (auto order_status = std::dynamic_pointer_cast<OrderStatusMessage>(message)) {
+        if (!requireAuth(session, "view")) return;
         handleOrderStatus(order_status, session);
     }
     else {
@@ -265,7 +348,8 @@ void Server::handleOrderSubmit(const std::shared_ptr<OrderSubmitMessage>& messag
     }
     
     // Market orders use price 0 as a sentinel — the matching engine ignores it
-    double order_price = (message->order_type == OrderType::MARKET) ? 0.0 : message->price;
+    double order_price = (message->order_type == OrderType::MARKET || 
+                          message->order_type == OrderType::STOP) ? 0.0 : message->price;
 
     // Create a new order
     auto order = std::make_shared<Order>(
@@ -275,8 +359,14 @@ void Server::handleOrderSubmit(const std::shared_ptr<OrderSubmitMessage>& messag
         message->quantity,
         message->symbol,
         message->client_id,
-        message->order_type
+        message->order_type,
+        message->stop_price
     );
+    
+    // Persist the order
+    if (order_store_) {
+        order_store_->saveOrder(order);
+    }
     
     // Add the order to the orderbook
     orderbook->addOrder(order);
@@ -295,6 +385,7 @@ void Server::handleOrderSubmit(const std::shared_ptr<OrderSubmitMessage>& messag
     status_message->side = order->getSide();
     status_message->order_type = order->getOrderType();
     status_message->price = order->getPrice();
+    status_message->stop_price = order->getStopPrice();
     status_message->quantity = order->getQuantity();
     status_message->filled_quantity = order->getQuantity() - order->getRemainingQuantity();
     status_message->status = order->getStatus();
@@ -396,18 +487,20 @@ void Server::handleSnapshotRequest(const std::shared_ptr<SnapshotRequestMessage>
 }
 
 void Server::handleOrderStatus(const std::shared_ptr<OrderStatusMessage>& message, SessionPtr session) {
-    // Check if the client owns the order
+    // Check if the client owns the order — compare against the session's
+    // server-assigned client ID, not the message's client_id field.
     bool is_owner = false;
     {
         std::lock_guard<std::mutex> lock(order_owners_mutex_);
         auto it = order_owners_.find(message->order_id);
-        if (it != order_owners_.end() && it->second == message->client_id) {
+        if (it != order_owners_.end() && it->second == session->getClientId()) {
             is_owner = true;
         }
     }
     
     if (!is_owner) {
-        std::cerr << "Client " << message->client_id << " requested status for order " 
+        std::cerr << "Client " << session->getClientId() << " (msg: " << message->client_id
+                  << ") requested status for order " 
                   << message->order_id << " which they don't own" << std::endl;
         session->sendMessage(std::make_shared<ErrorMessage>(
             "INVALID_ORDER", 
@@ -451,6 +544,7 @@ void Server::handleOrderStatus(const std::shared_ptr<OrderStatusMessage>& messag
     status_message->side = found_order->getSide();
     status_message->order_type = found_order->getOrderType();
     status_message->price = found_order->getPrice();
+    status_message->stop_price = found_order->getStopPrice();
     status_message->quantity = found_order->getQuantity();
     status_message->filled_quantity = found_order->getQuantity() - found_order->getRemainingQuantity();
     status_message->status = found_order->getStatus();
@@ -459,9 +553,140 @@ void Server::handleOrderStatus(const std::shared_ptr<OrderStatusMessage>& messag
     session->sendMessage(status_message);
 }
 
+void Server::handleLogin(const std::shared_ptr<LoginMessage>& message, SessionPtr session) {
+    auto response = std::make_shared<LoginResponseMessage>();
+    response->username = message->username;
+    
+    if (!order_store_) {
+        // No persistence — allow all logins
+        session->setAuthenticated(true);
+        session->setUsername(message->username);
+        session->setSessionToken(orderbook::generateUuid());
+        session->setPermissions("trade,view");
+        
+        response->success = true;
+        response->session_token = session->getSessionToken();
+    } else if (message->username == "guest" || 
+               order_store_->authenticateUser(message->username, message->password)) {
+        OrderStore::UserRecord user;
+        if (order_store_->getUser(message->username, user)) {
+            session->setPermissions(user.permissions);
+        } else {
+            session->setPermissions("trade,view");
+        }
+        
+        session->setAuthenticated(true);
+        session->setUsername(message->username);
+        session->setSessionToken(orderbook::generateUuid());
+        
+        response->success = true;
+        response->session_token = session->getSessionToken();
+        std::cout << "User '" << message->username << "' authenticated (session " 
+                  << session->getClientId() << ")" << std::endl;
+    } else {
+        response->success = false;
+        response->error_message = "Invalid credentials";
+        std::cerr << "Authentication failed for user '" << message->username 
+                  << "' (session " << session->getClientId() << ")" << std::endl;
+    }
+    
+    session->sendMessage(response);
+}
+
+void Server::handleRegister(const std::shared_ptr<RegisterMessage>& message, SessionPtr session) {
+    auto response = std::make_shared<RegisterResponseMessage>();
+    response->username = message->username;
+    
+    // Validate input
+    if (message->username.empty()) {
+        response->success = false;
+        response->error_message = "Username cannot be empty";
+        session->sendMessage(response);
+        return;
+    }
+    if (message->password.empty()) {
+        response->success = false;
+        response->error_message = "Password cannot be empty";
+        session->sendMessage(response);
+        return;
+    }
+    if (message->username.size() > 64 || message->password.size() > 128) {
+        response->success = false;
+        response->error_message = "Username or password too long";
+        session->sendMessage(response);
+        return;
+    }
+    
+    if (!order_store_) {
+        response->success = false;
+        response->error_message = "Registration unavailable (no persistence)";
+        session->sendMessage(response);
+        return;
+    }
+    
+    // Check if user already exists
+    OrderStore::UserRecord existing;
+    if (order_store_->getUser(message->username, existing)) {
+        response->success = false;
+        response->error_message = "Username already taken";
+        session->sendMessage(response);
+        return;
+    }
+    
+    // Create user with default permissions
+    OrderStore::UserRecord newUser;
+    newUser.username = message->username;
+    newUser.password = message->password;  // OrderStore will hash it
+    newUser.permissions = "trade,view";
+    
+    if (order_store_->saveUser(newUser)) {
+        response->success = true;
+        std::cout << "User '" << message->username << "' registered successfully (session "
+                  << session->getClientId() << ")" << std::endl;
+    } else {
+        response->success = false;
+        response->error_message = "Failed to create account";
+        std::cerr << "Registration failed for user '" << message->username
+                  << "' (session " << session->getClientId() << ")" << std::endl;
+    }
+    
+    session->sendMessage(response);
+}
+
+bool Server::requireAuth(SessionPtr session, const std::string& permission) {
+    // If auth is not required, auto-authenticate with full permissions
+    if (!auth_required_) {
+        if (!session->isAuthenticated()) {
+            session->setAuthenticated(true);
+            session->setPermissions("trade,view,admin");
+            session->setUsername("auto");
+        }
+        return true;
+    }
+    
+    if (!session->isAuthenticated()) {
+        session->sendMessage(std::make_shared<ErrorMessage>(
+            "AUTH_REQUIRED", "Login required before this operation"));
+        return false;
+    }
+    
+    if (!session->hasPermission(permission)) {
+        session->sendMessage(std::make_shared<ErrorMessage>(
+            "PERMISSION_DENIED", "Missing permission: " + permission));
+        return false;
+    }
+    
+    return true;
+}
+
 void Server::onOrderUpdated(const OrderPtr& order) {
     if (!order) {
         return;
+    }
+    
+    // Persist order update
+    if (order_store_) {
+        order_store_->updateOrder(order);
     }
     
     // Find the client that owns this order
@@ -505,6 +730,7 @@ void Server::onOrderUpdated(const OrderPtr& order) {
     status_message->side = order->getSide();
     status_message->order_type = order->getOrderType();
     status_message->price = order->getPrice();
+    status_message->stop_price = order->getStopPrice();
     status_message->quantity = order->getQuantity();
     status_message->filled_quantity = order->getQuantity() - order->getRemainingQuantity();
     status_message->status = order->getStatus();
@@ -514,8 +740,21 @@ void Server::onOrderUpdated(const OrderPtr& order) {
 }
 
 void Server::onTradeExecuted(const Trade& trade) {
+    trade_count_.fetch_add(1, std::memory_order_relaxed);
+
     if (order_generator_) {
         order_generator_->updateLastPrice(trade.price);
+    }
+
+    // Persist the trade
+    if (order_store_) {
+        OrderStore::TradeRecord tr;
+        tr.buy_order_id = trade.buy_order_id;
+        tr.sell_order_id = trade.sell_order_id;
+        tr.symbol = trade.symbol;
+        tr.price = trade.price;
+        tr.quantity = trade.quantity;
+        order_store_->saveTrade(tr);
     }
 
     // Build trade notification once, broadcast to all subscribers of this symbol.

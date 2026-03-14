@@ -11,13 +11,13 @@ using namespace orderbook;
 // Global variables for graceful shutdown
 std::shared_ptr<Server> server;
 asio::io_context io_context;
-std::atomic<uint64_t> order_count{0};
-std::atomic<uint64_t> trade_count{0};
 std::chrono::steady_clock::time_point start_time;
 
 // Signal handler for graceful shutdown
 void signal_handler(int signal) {
     std::cout << "Received signal " << signal << ", initiating shutdown..." << std::endl;
+    uint64_t order_count = server ? server->getOrderCount() : 0;
+    uint64_t trade_count = server ? server->getTradeCount() : 0;
     if (order_count > 0 || trade_count > 0) {
         auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
@@ -60,6 +60,8 @@ void print_usage(const char* program_name) {
               << "  -i, --interval MS     Snapshot interval in milliseconds (default: 1000)\n"
               << "  -g, --generator       Enable order generator for testing\n"
               << "  -b, --benchmark       Benchmarking orderbook speed\n"
+              << "  -a, --auth            Require authentication (login before trading)\n"
+              << "  -d, --db-path PATH    Path to SQLite database file (default: orderbook.db)\n"
               << "  -h, --help            Show this help message\n";
 }
 
@@ -69,6 +71,8 @@ int main(int argc, char* argv[]) {
     int snapshot_interval_ms = 1000;
     bool enable_generator = false;
     bool benchmark_mode = false;
+    bool require_auth = false;
+    std::string db_path = "orderbook.db";
     
     // Parse command line arguments
     for (int i = 1; i < argc; ++i) {
@@ -148,6 +152,15 @@ int main(int argc, char* argv[]) {
                     return 1;
                 }
             }
+        } else if (arg == "-a" || arg == "--auth") {
+            require_auth = true;
+        } else if (arg == "-d" || arg == "--db-path") {
+            if (i + 1 < argc) {
+                db_path = argv[++i];
+            } else {
+                std::cerr << "Error: Database path required after " << arg << "\n";
+                return 1;
+            }
         } else {
             std::cerr << "Error: Unknown option: " << arg << "\n";
             print_usage(argv[0]);
@@ -167,14 +180,23 @@ int main(int argc, char* argv[]) {
         // Set the snapshot interval
         server->setSnapshotInterval(snapshot_interval_ms);
         
-        // Create orderbooks for the specified symbols
+        // Configure authentication
+        server->setAuthRequired(require_auth);
+        
+        // Configure persistence (DB path only — actual init after orderbooks exist)
+        server->setDatabasePath(db_path);
+        
+        // Create orderbooks for the specified symbols FIRST, so that
+        // initPersistence() can restore saved orders into them.
         for (const auto& symbol : symbols) {
             if (!server->createOrderbook(symbol)) {
                 std::cerr << "Failed to create orderbook for symbol: " << symbol << std::endl;
             }
         }
 
-        std::shared_ptr<OrderGenerator> orderGenerator;
+        // Now initialise persistence — order restoration will find the orderbooks
+        server->initPersistence();
+
         if (enable_generator) {
             OrderGenerator::Config config;
             config.symbol = symbols[0];
@@ -189,37 +211,11 @@ int main(int argc, char* argv[]) {
             config.spread_factor = 0.005;       // Spread-aware side selection
             config.max_tracked_orders = 500;
 
-            orderGenerator = std::make_shared<OrderGenerator>(config);
-            orderGenerator->setOrderCallback([&](const OrderPtr& order) {
-                auto orderbook = server->getOrderbook(order->getSymbol());
-                if (orderbook) {
-                    orderbook->addOrder(order);
-                    order_count++;
-                }
-            });
+            // Use the server's integrated generator — sets up thread-safe order
+            // posting via io_context and preserves trade notification broadcasting.
+            server->configureOrderGenerator(config);
 
-            // Cancel callback: cancel on the orderbook directly
-            orderGenerator->setCancelCallback([&](const std::string& order_id) -> bool {
-                auto orderbook = server->getOrderbook(symbols[0]);
-                if (orderbook) {
-                    return orderbook->cancelOrder(order_id);
-                }
-                return false;
-            });
-
-            for (const auto& symbol : symbols) {
-                auto orderbook = server->getOrderbook(symbol);
-                if (orderbook) {
-                    orderbook->setTradeCallback([&, gen = orderGenerator](const Trade& trade) {
-                        trade_count++;
-                        // Feed last price back to generator so the price walk works
-                        gen->updateLastPrice(trade.price);
-                    });
-                }
-            }
-            
-            orderGenerator->start();
-            std::cout << "Order generator started for " << config.symbol << std::endl;
+            std::cout << "Order generator configured for " << config.symbol << std::endl;
         }
         // Start the server
         server->start();

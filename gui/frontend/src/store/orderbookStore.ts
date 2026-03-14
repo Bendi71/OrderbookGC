@@ -26,8 +26,9 @@ export interface OrderInfo {
   client_id: string;
   symbol: string;
   side: 'BUY' | 'SELL';
-  order_type: 'LIMIT' | 'MARKET';
+  order_type: 'LIMIT' | 'MARKET' | 'STOP' | 'STOP_LIMIT';
   price: number;
+  stop_price: number;
   quantity: number;
   filled_quantity: number;
   status: string;
@@ -47,7 +48,33 @@ export interface PricePoint {
   time: number;
 }
 
+export interface PositionInfo {
+  symbol: string;
+  quantity: number;
+  avg_entry_price: number;
+  last_price: number;
+  unrealized_pnl: number;
+  realized_pnl: number;
+  market_value: number;
+}
+
+export interface PnLState {
+  initial_capital: number;
+  equity: number;
+  total_pnl: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  positions: PositionInfo[];
+  fill_count: number;
+}
+
 interface OrderbookState {
+  // Auth state
+  isAuthenticated: boolean;
+  username: string;
+  sessionToken: string;
+  authError: string;
+
   connected: boolean;
   bids: PriceLevel[];
   asks: PriceLevel[];
@@ -55,13 +82,17 @@ interface OrderbookState {
   priceHistory: PricePoint[];
   orders: Map<string, OrderInfo>;
   notifications: Notification[];
+  pnl: PnLState;
 
+  setAuth: (success: boolean, username: string, token: string, error: string) => void;
+  logout: () => void;
   setConnected: (v: boolean) => void;
   setSnapshot: (bids: PriceLevel[], asks: PriceLevel[]) => void;
   addTrade: (t: Trade) => void;
   updateOrder: (o: OrderInfo) => void;
   addNotification: (n: Notification) => void;
   removeNotification: (id: string) => void;
+  updatePnL: (p: PnLState) => void;
 }
 
 const MAX_TRADES = 100;
@@ -69,6 +100,12 @@ const MAX_PRICE_HISTORY = 2000;
 const MAX_NOTIFICATIONS = 50;
 
 export const useOrderbookStore = create<OrderbookState>((set) => ({
+  // Auth state
+  isAuthenticated: false,
+  username: '',
+  sessionToken: '',
+  authError: '',
+
   connected: false,
   bids: [],
   asks: [],
@@ -76,6 +113,31 @@ export const useOrderbookStore = create<OrderbookState>((set) => ({
   priceHistory: [],
   orders: new Map(),
   notifications: [],
+  pnl: {
+    initial_capital: 100000,
+    equity: 100000,
+    total_pnl: 0,
+    realized_pnl: 0,
+    unrealized_pnl: 0,
+    positions: [],
+    fill_count: 0,
+  },
+
+  setAuth: (success, username, token, error) =>
+    set({
+      isAuthenticated: success,
+      username: success ? username : '',
+      sessionToken: success ? token : '',
+      authError: error,
+    }),
+
+  logout: () =>
+    set({
+      isAuthenticated: false,
+      username: '',
+      sessionToken: '',
+      authError: '',
+    }),
 
   setConnected: (v) => set({ connected: v }),
 
@@ -106,4 +168,6 @@ export const useOrderbookStore = create<OrderbookState>((set) => ({
     set((state) => ({
       notifications: state.notifications.filter((n) => n.id !== id),
     })),
+
+  updatePnL: (p) => set({ pnl: p }),
 }));
